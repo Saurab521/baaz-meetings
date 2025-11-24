@@ -1,57 +1,56 @@
 name: Deploy to Server
 
+# trigger on pushes to main (change branch if tumhara default branch alag ho)
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   deploy:
+    name: Deploy to Server
     runs-on: ubuntu-latest
+    # agar remote commands thode lambi chal sakti hain toh timeout badhao
+    timeout-minutes: 30
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: Deploy using SSH
-      uses: appleboy/ssh-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_IP }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        port: ${{ secrets.SERVER_PORT || 22 }}
-        script: |
-          set -e
-          DEPLOY_DIR=${{ secrets.DEPLOY_DIR || '/opt/meeting-display' }}
+      - name: Deploy using SSH
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          # required secrets (set below)
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          # optional: set SERVER_PORT secret only if SSH nonstandard port (e.g. 2222)
+          port: ${{ secrets.SERVER_PORT }}
+          # timeout for single SSH command inside action (optional)
+          timeout: 60s
+          script: |
+            set -e
+            DEPLOY_DIR=/opt/meeting-display
 
-          sudo mkdir -p "$DEPLOY_DIR"
-          sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} "$DEPLOY_DIR"
+            # ensure folder exists and is owned by remote ssh user
+            sudo mkdir -p "$DEPLOY_DIR"
+            sudo chown -R $USER:$USER "$DEPLOY_DIR"
 
-          cd "$DEPLOY_DIR"
+            cd "$DEPLOY_DIR"
 
-          if [ ! -d .git ]; then
-            git clone https://github.com/${{ github.repository }} .
-          else
-            git fetch --all
-            git reset --hard origin/main
-          fi
+            # clone or update repo
+            if [ ! -d .git ]; then
+              git clone https://github.com/${{ github.repository }} .
+            else
+              git fetch --all
+              git reset --hard origin/main
+            fi
 
-          docker compose pull || true
-          docker compose build --no-cache
-          docker compose up -d --remove-orphans
-          docker system prune -f
+            # bring up docker compose
+            docker compose pull || true
+            docker compose build --no-cache
+            docker compose up -d --remove-orphans
 
-
-
-    - name: Debug SSH Authentication
-      env:
-        SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
-      run: |
-        printf "%s" "$SSH_KEY" > /tmp/id_test
-        chmod 600 /tmp/id_test
-
-        echo "---- TESTING SSH ----"
-        ssh -vvv -i /tmp/id_test \
-          -o IdentitiesOnly=yes \
-          -o StrictHostKeyChecking=no \
-          root101@14.98.227.222 \
-          "echo CONNECTED_SUCCESS" || true
+            # clean unused images (optional)
+            docker system prune -f
