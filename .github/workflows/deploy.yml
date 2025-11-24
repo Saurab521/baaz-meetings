@@ -1,0 +1,41 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy using SSH
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT || 22 }}
+        script: |
+          set -e
+          DEPLOY_DIR=${{ secrets.DEPLOY_DIR || '/opt/meeting-display' }}
+
+          sudo mkdir -p "$DEPLOY_DIR"
+          sudo chown $USER:$USER "$DEPLOY_DIR"
+
+          cd "$DEPLOY_DIR"
+
+          if [ ! -d .git ]; then
+            git clone https://github.com/${{ github.repository }} .
+          else
+            git fetch --all
+            git reset --hard origin/main
+          fi
+
+          docker compose pull || true
+          docker compose build --no-cache
+          docker compose up -d --remove-orphans
+          docker system prune -f
