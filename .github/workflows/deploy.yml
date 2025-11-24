@@ -24,7 +24,7 @@ jobs:
           DEPLOY_DIR=${{ secrets.DEPLOY_DIR || '/opt/meeting-display' }}
 
           sudo mkdir -p "$DEPLOY_DIR"
-          sudo chown $USER:$USER "$DEPLOY_DIR"
+          sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} "$DEPLOY_DIR"
 
           cd "$DEPLOY_DIR"
 
@@ -39,3 +39,19 @@ jobs:
           docker compose build --no-cache
           docker compose up -d --remove-orphans
           docker system prune -f
+
+
+
+    - name: Debug SSH Authentication
+      env:
+        SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+      run: |
+        printf "%s" "$SSH_KEY" > /tmp/id_test
+        chmod 600 /tmp/id_test
+
+        echo "---- TESTING SSH ----"
+        ssh -vvv -i /tmp/id_test \
+          -o IdentitiesOnly=yes \
+          -o StrictHostKeyChecking=no \
+          root101@14.98.227.222 \
+          "echo CONNECTED_SUCCESS" || true
