@@ -5,42 +5,75 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy (SSH)
     runs-on: ubuntu-latest
-
+    env:
+      SERVER_IP: ${{ secrets.SERVER_IP }}
+      SERVER_USER: ${{ secrets.SERVER_USER }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT }}   # optional (set secret), leave empty => will default to 22 in the nc check
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: Deploy using SSH
-      uses: appleboy/ssh-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_IP }}          # ← IMPORTANT
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        port: ${{ secrets.SERVER_PORT }}
-        timeout: 120s
-        script: |
-          set -e
-          DEPLOY_DIR=/opt/meeting-display
+      - name: SSH debug - runner -> server connectivity
+        run: |
+          echo "Runner info:"
+          uname -a
+          echo "Trying to reach $SERVER_IP:${SERVER_PORT:-22}"
+          sudo apt-get update -y
+          sudo apt-get install -y netcat-openbsd || sudo apt-get install -y netcat || true
+          # try TCP connect to port (works even if host unreachable)
+          nc -vz ${SERVER_IP} ${SERVER_PORT:-22} || echo "nc failed (port closed or host unreachable)"
+        shell: bash
 
-          sudo mkdir -p "$DEPLOY_DIR"
-          sudo chown -R $(whoami):$(whoami) "$DEPLOY_DIR"
+      - name: Show uploaded secret fingerprints (optional)
+        run: |
+          # Useful to verify deployed public key fingerprint (non-sensitive)
+          # If you have a public key fingerprint in repo or /secrets/temp.pub on server, you can compare here.
+          echo "NOTE: Do not print private key content. This step is informational only."
 
-          cd "$DEPLOY_DIR"
+      - name: Deploy using SSH (run remote commands)
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          # Force allocation of a pseudo-tty so sudo that needs TTY works:
+          args: -tt
+          # Increase timeouts to be safe
+          timeout: 120
+          command_timeout: 10m
+          debug: true
+          script: |
+            set -e
+            DEPLOY_DIR=/opt/meeting-display
 
-          if [ ! -d .git ]; then
-            git clone https://github.com/${{ github.repository }} .
-          else
-            git fetch --all --prune
-            git reset --hard origin/main
-          fi
+            # ensure folder exists and is owned by remote ssh user
+            sudo mkdir -p "$DEPLOY_DIR"
+            sudo chown -R $(whoami):$(whoami) "$DEPLOY_DIR"
 
-          docker compose pull || true
-          docker compose build --no-cache
-          docker compose up -d --remove-orphans
-          docker system prune -f || true
+            cd "$DEPLOY_DIR"
+
+            # clone or update repo
+            if [ ! -d .git ]; then
+              git clone https://github.com/${{ github.repository }} .
+            else
+              git fetch --all --prune
+              git reset --hard origin/main
+            fi
+
+            # bring up docker compose
+            docker compose pull || true
+            docker compose build --no-cache
+            docker compose up -d --remove-orphans
+
+            # optional cleanup
+            docker system prune -f || true
