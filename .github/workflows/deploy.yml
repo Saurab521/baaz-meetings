@@ -12,57 +12,49 @@ jobs:
   deploy:
     name: Deploy (SSH)
     runs-on: ubuntu-latest
-    env:
-      SERVER_IP: ${{ secrets.SERVER_IP }}
-      SERVER_USER: ${{ secrets.SERVER_USER }}
-      SERVER_PORT: ${{ secrets.SERVER_PORT }}   # optional (set secret), leave empty => will default to 22 in the nc check
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: SSH debug - runner -> server connectivity
+      - name: Install netcat (for connectivity test)
         run: |
-          echo "Runner info:"
-          uname -a
-          echo "Trying to reach $SERVER_IP:${SERVER_PORT:-22}"
           sudo apt-get update -y
-          sudo apt-get install -y netcat-openbsd || sudo apt-get install -y netcat || true
-          # try TCP connect to port (works even if host unreachable)
-          nc -vz ${SERVER_IP} ${SERVER_PORT:-22} || echo "nc failed (port closed or host unreachable)"
-        shell: bash
+          sudo apt-get install -y netcat-openbsd
 
-      - name: Show uploaded secret fingerprints (optional)
+      - name: SSH connectivity test
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
         run: |
-          # Useful to verify deployed public key fingerprint (non-sensitive)
-          # If you have a public key fingerprint in repo or /secrets/temp.pub on server, you can compare here.
-          echo "NOTE: Do not print private key content. This step is informational only."
+          echo "Testing connection to $SERVER_IP on port ${SERVER_PORT:-22}"
+          nc -vz $SERVER_IP ${SERVER_PORT:-22} || echo "Port not reachable (may still work if firewall blocks ping)."
 
-      - name: Deploy using SSH (run remote commands)
+      - name: Deploy using SSH
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          # Force allocation of a pseudo-tty so sudo that needs TTY works:
           args: -tt
-          # Increase timeouts to be safe
-          timeout: 120
-          command_timeout: 10m
+          timeout: 120s              # FIXED
+          command_timeout: 10m       # OK
           debug: true
+          script_stop: true
           script: |
             set -e
+
             DEPLOY_DIR=/opt/meeting-display
 
-            # ensure folder exists and is owned by remote ssh user
+            echo "[1/6] Ensuring project directory exists"
             sudo mkdir -p "$DEPLOY_DIR"
             sudo chown -R $(whoami):$(whoami) "$DEPLOY_DIR"
-
             cd "$DEPLOY_DIR"
 
-            # clone or update repo
+            echo "[2/6] Cloning or updating repository"
             if [ ! -d .git ]; then
               git clone https://github.com/${{ github.repository }} .
             else
@@ -70,10 +62,15 @@ jobs:
               git reset --hard origin/main
             fi
 
-            # bring up docker compose
-            docker compose pull || true
-            docker compose build --no-cache
-            docker compose up -d --remove-orphans
+            echo "[3/6] Ensure Docker exists"
+            command -v docker || (echo "Docker missing"; exit 1)
 
-            # optional cleanup
-            docker system prune -f || true
+            echo "[4/6] Building and deploying via Docker Compose"
+            sudo docker compose pull || true
+            sudo docker compose build --no-cache
+            sudo docker compose up -d --remove-orphans
+
+            echo "[5/6] Cleaning system"
+            sudo docker system prune -f || true
+
+            echo "[6/6] Deployment complete!"
