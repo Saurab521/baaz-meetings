@@ -1,0 +1,10 @@
+flask
+flask-socketio
+redis
+python-dotenv
+google-api-python-client
+google-auth
+google-auth-httplib2
+python-dateutil
+eventlet
+gunicorn

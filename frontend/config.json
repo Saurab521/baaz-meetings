@@ -1,0 +1,6 @@
+{
+  "API_URL": "/api",
+  "REFRESH_INTERVAL_SECONDS": 10,
+  "SHOW_LOGO": true,
+  "AUTO_REFRESH": true
+}

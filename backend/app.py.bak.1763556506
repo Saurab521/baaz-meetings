@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""
+meeting-display backend (cleaned & patched)
+- retry on Google API transient errors
+- safe startup: single initial poll thread + background poller
+- bounded concurrency for calendar fetches
+- optional scheduler import guarded
+- Redis caching for state and meetings-today
+- minimal, clear structure suitable for running under gunicorn
+
+Place this file at: /opt/meeting-display/backend/app.py
+Then: docker-compose restart backend
+"""
+
+import os
+import json
+import time
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from flask import Flask, jsonify, send_from_directory, make_response
+from flask_socketio import SocketIO
+import redis
+from dateutil import parser as dateparser
+
+# optional libs
+try:
+    from flask_compress import Compress
+    FLASK_COMPRESS_AVAILABLE = True
+except Exception:
+    Compress = None
+    FLASK_COMPRESS_AVAILABLE = False
+
+# eventlet (optional)
+try:
+    import eventlet
+    from eventlet.semaphore import Semaphore as EventletSemaphore
+    EVENTLET_AVAILABLE = True
+except Exception:
+    eventlet = None
+    EventletSemaphore = None
+    EVENTLET_AVAILABLE = False
+
+# google libs (optional)
+GOOGLE_LIBS_AVAILABLE = False
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    GOOGLE_LIBS_AVAILABLE = True
+except Exception:
+    GOOGLE_LIBS_AVAILABLE = False
+
+# ---------- ENV / CONFIG ----------
+CALENDARS_JSON = os.getenv("CALENDARS_JSON", "[]")
+try:
+    CALENDARS = json.loads(CALENDARS_JSON)
+    if not isinstance(CALENDARS, list):
+        CALENDARS = []
+except Exception:
+    CALENDARS = []
+
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SA_FILE", "/secrets/google-sa.json")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+STABILITY_THRESHOLD = int(os.getenv("STABILITY_THRESHOLD", "2"))
+MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))
+MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "4"))
+
+# ---------- FLASK / SOCKETIO ----------
+app = Flask(__name__, static_folder="/frontend")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+if FLASK_COMPRESS_AVAILABLE:
+    try:
+        Compress(app)
+        app.logger.info("Flask-Compress enabled.")
+    except Exception as e:
+        app.logger.warning("Flask-Compress failed to enable: %s", e)
+
+# ---------- REDIS ----------
+r = None
+try:
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    r.ping()
+    app.logger.info("Connected to Redis")
+except Exception as e:
+    app.logger.warning("Redis not available: %s", e)
+    r = None
+
+# ---------- GOOGLE CLIENT ----------
+calendar_service = None
+if GOOGLE_LIBS_AVAILABLE and os.path.exists(SERVICE_ACCOUNT_FILE):
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE,
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+        )
+        calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        app.logger.info("Google Calendar client initialized.")
+    except Exception as e:
+        app.logger.warning("Google client init failed: %s", e)
+        calendar_service = None
+else:
+    app.logger.warning("Google libs / service account missing.")
+
+# calendar semaphore (bounded concurrency)
+if EVENTLET_AVAILABLE and EventletSemaphore is not None:
+    calendar_lock = EventletSemaphore(MAX_CALENDAR_CONCURRENCY)
+else:
+    from threading import BoundedSemaphore
+    calendar_lock = BoundedSemaphore(MAX_CALENDAR_CONCURRENCY)
+
+# ---------- time helpers ----------
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_dt(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    try:
+        dt = dateparser.parse(dt_str)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+# ---------- calendar helpers ----------
+
+def calendar_id_for_room(room_id: str) -> Optional[str]:
+    if "@" in room_id:
+        return room_id
+    for item in CALENDARS:
+        try:
+            if str(item.get("id")) == str(room_id):
+                return item.get("calendarId")
+            if str(item.get("name")) == str(room_id):
+                return item.get("calendarId")
+        except Exception:
+            pass
+    return None
+
+# ---------- event normalization ----------
+
+def normalize_event(ev):
+    if not ev or not isinstance(ev, dict):
+        return None
+    start_field = ev.get("start", {})
+    end_field = ev.get("end", {})
+    start_str = start_field.get("dateTime") or start_field.get("date") or None
+    end_str = end_field.get("dateTime") or end_field.get("date") or None
+    sdt = parse_dt(start_str) if start_str else None
+    edt = parse_dt(end_str) if end_str else None
+    try:
+        if edt and end_str and 'T' not in end_str:
+            edt = edt - timedelta(seconds=1)
+    except Exception:
+        pass
+    start_ts = int(sdt.timestamp() * 1000) if sdt else None
+    end_ts = int(edt.timestamp() * 1000) if edt else None
+    organizer = ""
+    org = ev.get("organizer")
+    if isinstance(org, dict):
+        organizer = org.get("email") or org.get("displayName") or ""
+    elif isinstance(org, str):
+        organizer = org
+    return {
+        "id": ev.get("id"),
+        "title": ev.get("summary") or ev.get("title") or "Meeting",
+        "start": start_str,
+        "end": end_str,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "organizer": organizer
+    }
+
+# ---------- summary builder ----------
+
+def build_summary(events, count=2):
+    if not events:
+        return [], 0
+    summary = []
+    for ev in events[:count]:
+        summary.append({
+            "id": ev["id"],
+            "title": ev["title"],
+            "start": ev["start"],
+            "end": ev["end"]
+        })
+    return summary, len(events)
+
+# ---------- stability (no flicker) ----------
+
+def get_prev_state(room_key):
+    try:
+        if not r:
+            return None
+        raw = r.get(f"room:{room_key}:state")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return None
+
+
+def save_state(room_key, state):
+    if not r:
+        return
+    try:
+        r.set(f"room:{room_key}:state", json.dumps(state))
+    except Exception:
+        pass
+
+
+def apply_stability(room_key, computed_state):
+    prev = get_prev_state(room_key) or {}
+    prev_status = bool(prev.get("occupied", False))
+    prev_stable = int(prev.get("_stable", 0))
+    instant_status = bool(computed_state["occupied"])
+    if instant_status == prev_status:
+        stable_value = prev_stable + 1
+        final_status = instant_status
+    else:
+        if prev_stable + 1 >= STABILITY_THRESHOLD:
+            stable_value = STABILITY_THRESHOLD
+            final_status = instant_status
+        else:
+            stable_value = prev_stable + 1
+            final_status = prev_status
+    final_state = {
+        "occupied": final_status,
+        "is_ongoing": bool(computed_state["current"]),
+        "current": computed_state["current"],
+        "next": computed_state["next"],
+        "all": computed_state["all"],
+        "summary": computed_state["summary"],
+        "next_count": computed_state["next_count"],
+        "_stable": stable_value,
+        "last_success": now_utc().isoformat(),
+        "last_error": None
+    }
+    save_state(room_key, final_state)
+    return final_state
+
+# ---------- GOOGLE FETCH HELPERS (with retries) ----------
+
+def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
+    if calendar_service is None:
+        return []
+    acquired = False
+    try:
+        calendar_lock.acquire()
+        acquired = True
+        # try to use client-side retries via googleapiclient if available
+        try:
+            result = calendar_service.events().list(
+                calendarId=calendar_id,
+                timeMin=start_iso,
+                timeMax=end_iso,
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=200,
+            ).execute(num_retries=3)
+        except TypeError:
+            # older googleapiclient may not accept num_retries param
+            try:
+                result = calendar_service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=start_iso,
+                    timeMax=end_iso,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=200,
+                ).execute()
+            except Exception as e:
+                app.logger.warning("Calendar fetch error %s: %s", calendar_id, e)
+                return []
+        except Exception as e:
+            app.logger.warning("Calendar fetch error %s: %s", calendar_id, e)
+            return []
+        return result.get("items", []) or []
+    finally:
+        if acquired:
+            try:
+                calendar_lock.release()
+            except Exception:
+                pass
+
+
+def fetch_full_day_events(calendar_id: str):
+    now = now_utc()
+    start_day = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+    end_day = start_day + timedelta(days=1)
+    start_iso = start_day.isoformat().replace("+00:00", "Z")
+    end_iso = end_day.isoformat().replace("+00:00", "Z")
+    return fetch_events_for_range(calendar_id, start_iso, end_iso)
+
+# ---------- compute normalized state ----------
+
+def compute_normalized_state(raw_events):
+    normalized = []
+    for ev in raw_events:
+        ne = normalize_event(ev)
+        if ne:
+            normalized.append(ne)
+    normalized.sort(key=lambda x: (x.get("start_ts") or 9999999999999))
+    now_ms = int(now_utc().timestamp() * 1000)
+    current = None
+    next_ev = None
+    for ev in normalized:
+        st = ev.get("start_ts")
+        en = ev.get("end_ts")
+        if st and en:
+            if st <= now_ms < en:
+                current = ev
+            elif st > now_ms and next_ev is None:
+                next_ev = ev
+    summary, next_count = build_summary(normalized, count=2)
+    return {
+        "occupied": bool(current),
+        "current": current,
+        "next": next_ev,
+        "all": normalized,
+        "summary": summary,
+        "next_count": next_count
+    }
+
+# ---------- poller / worker ----------
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def process_one_calendar(room):
+    rid = room.get("id") or room.get("name")
+    cal = room.get("calendarId")
+    if not cal:
+        return
+    start_time = time.time()
+    try:
+        raw_events = fetch_full_day_events(cal)
+        computed_state = compute_normalized_state(raw_events)
+        final_state = apply_stability(rid, computed_state)
+        # cache meetings_today
+        try:
+            if r:
+                key = f"room:{rid}:meetings_today"
+                r.set(key, json.dumps(final_state.get("all", [])), ex=MEETINGS_CACHE_TTL)
+        except Exception:
+            pass
+        # emit via socket
+        try:
+            socketio.emit("room_state", {"room_id": rid, "state": final_state}, namespace="/rooms")
+        except Exception:
+            pass
+        duration = time.time() - start_time
+        app.logger.debug("Polled %s in %.2fs -> occupied=%s next=%s", rid, duration, final_state["occupied"], bool(final_state["next"]))
+    except Exception as e:
+        app.logger.exception("process_one_calendar error for %s: %s", rid, e)
+
+
+def poller_loop():
+    app.logger.info("Starting poller (interval=%s, stability=%s, concurrency=%s)", POLL_INTERVAL, STABILITY_THRESHOLD, MAX_CALENDAR_CONCURRENCY)
+    while True:
+        try:
+            if not CALENDARS:
+                app.logger.debug("No calendars configured; sleeping.")
+            else:
+                max_workers = min(MAX_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    futures = []
+                    for room in CALENDARS:
+                        futures.append(ex.submit(process_one_calendar, room))
+                    for fut in as_completed(futures):
+                        try:
+                            fut.result()
+                        except Exception as e:
+                            app.logger.exception("Poll worker exception: %s", e)
+        except Exception as e:
+            app.logger.exception("Poller fatal error: %s", e)
+        time.sleep(POLL_INTERVAL)
+
+# ---------- API endpoints ----------
+@app.route("/api/rooms")
+def api_rooms():
+    return jsonify(CALENDARS)
+
+
+@app.route("/api/rooms/<room_id>/state")
+def api_room_state(room_id):
+    key = f"room:{room_id}:state"
+    try:
+        if r:
+            raw = r.get(key)
+            if raw:
+                return jsonify(json.loads(raw))
+    except Exception:
+        pass
+    return jsonify({
+        "occupied": False,
+        "current": None,
+        "next": None,
+        "summary": [],
+        "next_count": 0,
+        "_stable": 0,
+        "last_error": "no redis state"
+    })
+
+
+@app.route("/api/rooms/<room_id>/meetings-today")
+def api_room_meetings_today(room_id):
+    calendar_id = calendar_id_for_room(room_id)
+    if not calendar_id:
+        return jsonify([])
+    cache_key = f"room:{room_id}:meetings_today"
+    try:
+        if r:
+            cached = r.get(cache_key)
+            if cached:
+                try:
+                    return jsonify(json.loads(cached))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        raw_events = fetch_full_day_events(calendar_id)
+        normalized = [normalize_event(ev) for ev in raw_events if normalize_event(ev)]
+        normalized.sort(key=lambda ev: ev.get("start_ts") or 0)
+        try:
+            if r:
+                r.set(cache_key, json.dumps(normalized), ex=MEETINGS_CACHE_TTL)
+        except Exception:
+            pass
+        return jsonify(normalized)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/api/rooms/list-with-state")
+def api_list_with_state():
+    output = []
+    for room in CALENDARS:
+        rid = room.get("id") or room.get("name")
+        state = {}
+        key = f"room:{rid}:state"
+        try:
+            if r:
+                raw = r.get(key)
+                if raw:
+                    state = json.loads(raw)
+        except Exception:
+            pass
+        output.append({
+            "id": room.get("id"),
+            "name": room.get("name"),
+            "floor": room.get("floor"),
+            "calendarId": room.get("calendarId"),
+            "state": state
+        })
+    return jsonify(output)
+
+# ---------- static frontend serve (no caching) ----------
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    static_root = app.static_folder or "/frontend"
+    fullpath = os.path.join(static_root, path)
+    if path and os.path.exists(fullpath):
+        resp = send_from_directory(static_root, path)
+        return resp
+    index = os.path.join(static_root, "index.html")
+    if os.path.exists(index):
+        with open(index, 'rb') as fh:
+            data = fh.read()
+        resp = make_response(data)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        if 'ETag' in resp.headers:
+            del resp.headers['ETag']
+        return resp
+    return jsonify({"status": "ok", "message": "frontend missing"})
+
+# ---------- health / version ----------
+@app.route("/_health")
+def health():
+    info = {
+        "status": "ok",
+        "redis": bool(r is not None),
+        "google_client": bool(calendar_service is not None),
+        "calendars_count": len(CALENDARS),
+        "time": now_utc().isoformat()
+    }
+    return jsonify(info)
+
+@app.route("/_version")
+def version():
+    return jsonify({"app": "meeting-display-backend", "version": "1.0.0", "time": now_utc().isoformat()})
+
+# ---------- graceful shutdown (placeholder) ----------
+def stop_background_poller():
+    app.logger.info("Stopping poller (if running).")
+
+# ---------- startup helpers ----------
+def start_background_poller():
+    try:
+        if EVENTLET_AVAILABLE and eventlet is not None:
+            eventlet.spawn_n(poller_loop)
+            app.logger.info("Poller greenlet started (eventlet).")
+        else:
+            t = threading.Thread(target=poller_loop, daemon=True, name="poller-thread")
+            t.start()
+            app.logger.info("Poller thread started (threading).")
+    except Exception as e:
+        app.logger.exception("Failed to start poller: %s", e)
+
+
+def run_initial_poll_once():
+    app.logger.info("Running initial one-shot poll for all calendars...")
+    try:
+        for room in CALENDARS:
+            try:
+                rid = room.get("id") or room.get("name")
+                cal = room.get("calendarId")
+                if not cal:
+                    continue
+                raw_events = fetch_full_day_events(cal)
+                computed_state = compute_normalized_state(raw_events)
+                final_state = apply_stability(rid, computed_state)
+                try:
+                    socketio.emit("room_state", {"room_id": rid, "state": final_state}, namespace="/rooms")
+                except Exception:
+                    pass
+                app.logger.debug("Initial poll %s → occupied=%s", rid, final_state["occupied"])
+            except Exception as e:
+                app.logger.warning("Initial poll error for %s: %s", room, e)
+    except Exception as e:
+        app.logger.exception("Initial poll failed: %s", e)
+
+# ---------- safe startup block (idempotent) ----------
+
+def _run_initial_once_and_mark():
+    try:
+        app.logger.info("Running initial one-shot poll (startup)...")
+        run_initial_poll_once()
+        app.logger.info("Initial one-shot poll completed.")
+    except Exception:
+        app.logger.exception("Initial one-shot poll failed at startup")
+
+try:
+    threading.Thread(target=_run_initial_once_and_mark, daemon=True, name="initial-poller").start()
+except Exception:
+    app.logger.exception("Failed to spawn initial poll thread")
+
+try:
+    start_background_poller()
+except Exception:
+    app.logger.exception("Background poller failed to start")
+
+try:
+    from scheduler import start_scheduler as _ss
+    try:
+        _ss()
+        app.logger.info("External scheduler started.")
+    except Exception:
+        app.logger.exception("External scheduler failed to start")
+except Exception:
+    app.logger.debug("No external scheduler module available (skipping).")
+
+# If run directly, run the socketio app (helpful for local dev)
+if __name__ == "__main__":
+    try:
+        socketio.run(app, host="0.0.0.0", port=8000, debug=False)
+    except Exception:
+        app.logger.exception("Failed to run app via socketio")
