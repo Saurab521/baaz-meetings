@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,8 +40,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          timeout: 120s              # FIXED
-          command_timeout: 10m       # OK
+          timeout: 120s
+          command_timeout: 10m
           debug: true
           script_stop: true
           script: |
