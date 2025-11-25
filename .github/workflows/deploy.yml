@@ -39,7 +39,6 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          args: -tt
           timeout: 120s              # FIXED
           command_timeout: 10m       # OK
           debug: true
