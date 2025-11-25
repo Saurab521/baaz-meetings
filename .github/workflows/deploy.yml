@@ -23,7 +23,7 @@ jobs:
       - name: Install netcat (for connectivity test)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y netcat-openbsd
+          sudo apt-get install -y netcat-openbsd rsync curl
 
       - name: SSH connectivity test
         env:
@@ -54,12 +54,43 @@ jobs:
             sudo chown -R $(whoami):$(whoami) "$DEPLOY_DIR"
             cd "$DEPLOY_DIR"
 
-            echo "[2/6] Cloning or updating repository"
-            if [ ! -d .git ]; then
-              git clone https://github.com/${{ github.repository }} .
-            else
+            echo "[2/6] Cloning or updating repository (robust)"
+
+            # Case 1: already a git repo
+            if [ -d .git ]; then
+              echo "→ Found .git — updating existing repo"
               git fetch --all --prune
               git reset --hard origin/main
+
+            # Case 2: directory not empty & no .git — clone to temp and sync
+            elif [ -n "$(ls -A . 2>/dev/null)" ]; then
+              echo "→ Directory is not empty and no .git — cloning in temp directory"
+              tmpdir=$(mktemp -d)
+
+              echo "→ Cloning to temp: $tmpdir"
+              GIT_TERMINAL_PROMPT=0 git clone https://github.com/${{ github.repository }} "$tmpdir" || {
+                echo "git clone to tmp failed";
+                exit 1;
+              }
+
+              echo "→ Syncing repo into target folder"
+              rsync -a --delete "$tmpdir/" .
+
+              rm -rf "$tmpdir"
+
+              echo "→ Initializing git structure"
+              git init
+              git remote add origin https://github.com/${{ github.repository }} || true
+              git fetch origin
+              git reset --hard origin/main
+
+            # Case 3: directory empty — normal clone
+            else
+              echo "→ Directory empty — cloning directly"
+              GIT_TERMINAL_PROMPT=0 git clone https://github.com/${{ github.repository }} . || {
+                echo "git clone failed";
+                exit 1;
+              }
             fi
 
             echo "[3/6] Ensure Docker exists"
