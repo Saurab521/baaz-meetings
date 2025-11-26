@@ -1,10 +1,4 @@
-# app.py - Meeting display backend (eventlet-safe)
-# Notes:
-# - eventlet.monkey_patch() runs at top before network libs are imported
-# - SocketIO uses async_mode="eventlet"
-# - When eventlet is present, calendar polling is serialized to avoid
-#   simultaneous reads on the same fileno (prevents Google API read errors).
-
+# app.py - Meeting display backend (eventlet-safe + immediate end detection)
 import eventlet
 # IMPORTANT: patch before stdlib network imports
 eventlet.monkey_patch()
@@ -117,7 +111,7 @@ else:
     app.logger.warning("Google libs / service account missing or path not found.")
 
 # ---------- Calendar concurrency control ----------
-# If eventlet present, force effective concurrency to 1 to avoid simultaneous reads.
+# When using eventlet, serialize calendar reads to avoid "Second simultaneous read on fileno"
 if EVENTLET_AVAILABLE and EventletSemaphore is not None:
     EFFECTIVE_CALENDAR_CONCURRENCY = 1
     calendar_lock = EventletSemaphore(1)
@@ -231,6 +225,33 @@ def apply_stability(room_key, computed_state):
     prev_status = bool(prev.get("occupied", False))
     prev_stable = int(prev.get("_stable", 0))
     instant_status = bool(computed_state["occupied"])
+
+    # Immediate clear: if we previously thought room was occupied and the previous 'current'
+    # event has actually ended (based on stored end_ts), clear immediately.
+    try:
+        prev_current = prev.get("current") or {}
+        prev_end_ts = int(prev_current.get("end_ts")) if prev_current and prev_current.get("end_ts") else None
+        now_ms = int(now_utc().timestamp() * 1000)
+        if prev_status and not instant_status and prev_end_ts and now_ms >= prev_end_ts:
+            final_state = {
+                "occupied": False,
+                "is_ongoing": False,
+                "current": None,
+                "next": computed_state.get("next"),
+                "all": computed_state.get("all"),
+                "summary": computed_state.get("summary"),
+                "next_count": computed_state.get("next_count"),
+                "_stable": STABILITY_THRESHOLD,
+                "last_success": iso_now(),
+                "last_error": None
+            }
+            save_state(room_key, final_state)
+            return final_state
+    except Exception:
+        # if something goes wrong here, fall back to normal stability logic below
+        pass
+
+    # Normal stability logic (prevent flicker)
     if instant_status == prev_status:
         stable_value = prev_stable + 1
         final_status = instant_status
@@ -241,6 +262,7 @@ def apply_stability(room_key, computed_state):
         else:
             stable_value = prev_stable + 1
             final_status = prev_status
+
     final_state = {
         "occupied": final_status,
         "is_ongoing": bool(computed_state["current"]),
@@ -322,7 +344,8 @@ def compute_normalized_state(raw_events):
         st = ev.get("start_ts")
         en = ev.get("end_ts")
         if st and en:
-            if st <= now_ms < en:
+            # treat end as exclusive with 1s grace to avoid lingering "ONGOING" at exact end
+            if st <= now_ms < (en - 1000):
                 current = ev
             elif st > now_ms and next_ev is None:
                 next_ev = ev
@@ -380,7 +403,6 @@ def poll_all_calendars_once():
                 pool.spawn_n(process_one_calendar, room)
             pool.waitall()
         except Exception as e:
-            # fallback to sequential processing if GreenPool fails for any reason
             app.logger.exception("GreenPool failed, falling back to sequential poll: %s", e)
             for room in CALENDARS:
                 try:
@@ -400,25 +422,16 @@ def poll_all_calendars_once():
 
 # ---------- Leader lock (redis) ----------
 def try_acquire_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
-    """
-    Acquire a redis lock (SET NX). Stores instance_id as value. Returns True if acquired.
-    """
     if not r:
-        # no redis -> assume single-instance (acquire locally)
         app.logger.debug("No redis; assuming leader on this instance.")
         return True
     try:
-        # SET key value NX EX ttl
         return r.set(LEADER_LOCK_KEY, instance_id, nx=True, ex=ttl)
     except Exception:
         app.logger.exception("Leader lock acquire error")
         return False
 
 def renew_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
-    """
-    Renew the lock only if it's held by us.
-    We use a simple check-and-set via Lua script for safety.
-    """
     if not r:
         return True
     try:
@@ -455,11 +468,6 @@ _poller_thread = None
 _poller_stop_event = threading.Event()
 
 def poller_leader_loop():
-    """
-    This runs in a single thread inside the chosen leader process.
-    It acquires the leader lock, runs poll loops, and renews the lock periodically.
-    If it loses the lock, it exits.
-    """
     instance_id = APP_INSTANCE_ID
     app.logger.info("Poller leader loop starting (instance=%s)", instance_id)
     got_lock = try_acquire_leader_lock(instance_id)
@@ -477,23 +485,19 @@ def poller_leader_loop():
             app.logger.exception("Initial poll (leader) failed")
 
         while not _poller_stop_event.is_set():
-            # do periodic poll
             start = time.time()
             try:
                 poll_all_calendars_once()
             except Exception:
                 app.logger.exception("Periodic poll failed")
 
-            # Sleep remainder and renew lock at intervals
             elapsed = time.time() - start
             sleep_for = max(1, POLL_INTERVAL - int(elapsed))
-            # during sleep, renew the lock every LEADER_RENEW_INTERVAL seconds
             slept = 0
             while slept < sleep_for and not _poller_stop_event.is_set():
                 time_to_next = min(1, sleep_for - slept)
                 time.sleep(time_to_next)
                 slept += time_to_next
-                # renew if needed
                 if time.time() - last_renew >= LEADER_RENEW_INTERVAL:
                     ok = renew_leader_lock(instance_id)
                     if not ok:
@@ -501,9 +505,7 @@ def poller_leader_loop():
                         _poller_stop_event.set()
                         break
                     last_renew = time.time()
-
     finally:
-        # cleanup: release lock if still ours
         try:
             release_leader_lock(instance_id)
         except Exception:
@@ -656,50 +658,37 @@ def start_external_scheduler_if_any():
         app.logger.debug("No external scheduler module available (skipping).")
 
 def start_background_services():
-    """
-    Called at import time (gunicorn worker) to attempt to start leader poller.
-    Only the process that acquires the redis leader lock will perform polling.
-    """
     try:
-        # Start external scheduler if present
         start_external_scheduler_if_any()
     except Exception:
         pass
 
-    # Try to acquire and start poller in this process (leader election handled inside thread)
     try:
         start_leader_poller_thread()
     except Exception:
         app.logger.exception("Failed to start leader poller thread")
 
-# Run initial one-shot poll once in a short background thread (idempotent)
 def _background_initial_poll():
     try:
         app.logger.info("Background initial one-shot poll starting...")
-        # If we have redis, try to run initial poll only if we become leader just for that run.
-        # This avoids many processes running it in multi-worker setups.
         instance_id = APP_INSTANCE_ID
         got_lock = try_acquire_leader_lock(instance_id, ttl=LEADER_LOCK_TTL)
         if got_lock:
             try:
                 poll_all_calendars_once()
             finally:
-                # release lock after initial run so leader selection continues
                 release_leader_lock(instance_id)
         else:
-            # Not leader — don't run initial poll
             app.logger.debug("Initial poll skipped (not leader).")
         app.logger.info("Background initial one-shot poll finished.")
     except Exception:
         app.logger.exception("Background initial one-shot poll failed.")
 
 try:
-    # spawn initial poll thread (non-blocking)
     threading.Thread(target=_background_initial_poll, daemon=True, name="initial-poller").start()
 except Exception:
     app.logger.exception("Failed to spawn initial poll thread")
 
-# Start background services (leader poller + optional scheduler)
 try:
     start_background_services()
 except Exception:
