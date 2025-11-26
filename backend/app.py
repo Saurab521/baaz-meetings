@@ -1,5 +1,12 @@
+# app.py - Meeting display backend (eventlet-safe)
+# Notes:
+# - eventlet.monkey_patch() runs at top before network libs are imported
+# - SocketIO uses async_mode="eventlet"
+# - When eventlet is present, calendar polling is serialized to avoid
+#   simultaneous reads on the same fileno (prevents Google API read errors).
+
 import eventlet
-# IMPORTANT: monkey_patch must run before any stdlib networking libs are imported.
+# IMPORTANT: patch before stdlib network imports
 eventlet.monkey_patch()
 
 import os
@@ -59,7 +66,10 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 STABILITY_THRESHOLD = int(os.getenv("STABILITY_THRESHOLD", "2"))
 
 MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))  # seconds
-MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "6"))
+try:
+    MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "6"))
+except Exception:
+    MAX_CALENDAR_CONCURRENCY = 6
 
 # Leader lock settings (so only one worker performs polling)
 LEADER_LOCK_KEY = os.getenv("LEADER_LOCK_KEY", "meeting_display:leader")
@@ -70,8 +80,7 @@ APP_INSTANCE_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 # ---------- FLASK / SOCKET.IO ----------
 app = Flask(__name__, static_folder="/frontend")
-
-# Use eventlet async mode so Socket.IO + gunicorn/eventlet remain consistent.
+# Use eventlet async mode so Socket.IO and gunicorn/eventlet are consistent
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 if FLASK_COMPRESS_AVAILABLE:
@@ -108,11 +117,14 @@ else:
     app.logger.warning("Google libs / service account missing or path not found.")
 
 # ---------- Calendar concurrency control ----------
+# If eventlet present, force effective concurrency to 1 to avoid simultaneous reads.
 if EVENTLET_AVAILABLE and EventletSemaphore is not None:
-    calendar_lock = EventletSemaphore(MAX_CALENDAR_CONCURRENCY)
+    EFFECTIVE_CALENDAR_CONCURRENCY = 1
+    calendar_lock = EventletSemaphore(1)
 else:
+    EFFECTIVE_CALENDAR_CONCURRENCY = MAX_CALENDAR_CONCURRENCY
     from threading import BoundedSemaphore
-    calendar_lock = BoundedSemaphore(MAX_CALENDAR_CONCURRENCY)
+    calendar_lock = BoundedSemaphore(EFFECTIVE_CALENDAR_CONCURRENCY)
 
 # ---------- Helpers ----------
 def now_utc() -> datetime:
@@ -324,7 +336,7 @@ def compute_normalized_state(raw_events):
         "next_count": next_count
     }
 
-# ---------- Poller worker (parallel) ----------
+# ---------- Poller worker (parallel / eventlet-safe) ----------
 def process_one_calendar(room):
     rid = room.get("id") or room.get("name")
     cal = room.get("calendarId")
@@ -357,10 +369,10 @@ def poll_all_calendars_once():
         app.logger.debug("No calendars configured.")
         return
 
-    max_workers = min(MAX_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
+    max_workers = min(EFFECTIVE_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
 
     if EVENTLET_AVAILABLE:
-        # use eventlet GreenPool to avoid mixing OS threads + eventlet greenthreads
+        # use eventlet GreenPool but limit to EFFECTIVE_CALENDAR_CONCURRENCY (likely 1)
         try:
             from eventlet.greenpool import GreenPool
             pool = GreenPool(size=max_workers)
