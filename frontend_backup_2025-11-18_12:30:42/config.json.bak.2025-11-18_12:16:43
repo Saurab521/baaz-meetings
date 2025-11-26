@@ -1,9 +1,0 @@
-sudo tee /var/www/meeting-frontend/config.json > /dev/null <<'JSON'
-{
-  "API_URL": "/api",
-  "REFRESH_INTERVAL_SECONDS": 10,
-  "SHOW_LOGO": true,
-  "AUTO_REFRESH": true
-}
-JSON
-
