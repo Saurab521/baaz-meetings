@@ -1,3 +1,7 @@
+import eventlet
+# IMPORTANT: monkey_patch must run before any stdlib networking libs are imported.
+eventlet.monkey_patch()
+
 import os
 import json
 import time
@@ -20,13 +24,11 @@ except Exception:
     Compress = None
     FLASK_COMPRESS_AVAILABLE = False
 
-# Eventlet optional (not required)
+# Eventlet availability & semaphore
 try:
-    import eventlet
     from eventlet.semaphore import Semaphore as EventletSemaphore
     EVENTLET_AVAILABLE = True
 except Exception:
-    eventlet = None
     EventletSemaphore = None
     EVENTLET_AVAILABLE = False
 
@@ -68,7 +70,9 @@ APP_INSTANCE_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 # ---------- FLASK / SOCKET.IO ----------
 app = Flask(__name__, static_folder="/frontend")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+# Use eventlet async mode so Socket.IO + gunicorn/eventlet remain consistent.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 if FLASK_COMPRESS_AVAILABLE:
     try:
@@ -321,8 +325,6 @@ def compute_normalized_state(raw_events):
     }
 
 # ---------- Poller worker (parallel) ----------
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 def process_one_calendar(room):
     rid = room.get("id") or room.get("name")
     cal = room.get("calendarId")
@@ -354,14 +356,35 @@ def poll_all_calendars_once():
     if not CALENDARS:
         app.logger.debug("No calendars configured.")
         return
+
     max_workers = min(MAX_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(process_one_calendar, room) for room in CALENDARS]
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                app.logger.exception("Poll worker exception: %s", e)
+
+    if EVENTLET_AVAILABLE:
+        # use eventlet GreenPool to avoid mixing OS threads + eventlet greenthreads
+        try:
+            from eventlet.greenpool import GreenPool
+            pool = GreenPool(size=max_workers)
+            for room in CALENDARS:
+                pool.spawn_n(process_one_calendar, room)
+            pool.waitall()
+        except Exception as e:
+            # fallback to sequential processing if GreenPool fails for any reason
+            app.logger.exception("GreenPool failed, falling back to sequential poll: %s", e)
+            for room in CALENDARS:
+                try:
+                    process_one_calendar(room)
+                except Exception:
+                    app.logger.exception("Sequential poll error for room: %s", room)
+    else:
+        # fallback to ThreadPoolExecutor when eventlet is not available
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(process_one_calendar, room) for room in CALENDARS]
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    app.logger.exception("Poll worker exception: %s", e)
 
 # ---------- Leader lock (redis) ----------
 def try_acquire_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
@@ -491,7 +514,7 @@ def stop_leader_poller_thread():
         _poller_stop_event.set()
         _poller_thread.join(timeout=5)
         _poller_thread = None
-        app.logger.info("Leader poller thread stopped.")
+        app.logger.info("Poller thread stopped.")
 
 # ---------- API endpoints ----------
 @app.route("/api/rooms")
