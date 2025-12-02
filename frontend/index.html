@@ -3,8 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Baaz Bike — Meeting Rooms Dashboard</title>
-  <meta name="description" content="Real-time meeting room availability for Baaz Bike - Optimized for 21 rooms">
+  <title>Baaz Bike — Meeting Rooms</title>
   <style>
     :root{
       --brand-orange:#ff6a00;
@@ -47,11 +46,9 @@
       cursor:pointer;
       font-weight:600;
       box-shadow:0 8px 18px rgba(255,106,0,0.12);
-      transition:0.2s;
     }
-    .btn:hover{ transform:translateY(-2px); box-shadow:0 10px 22px rgba(255,106,0,0.18); }
 
-    #clock{ color:var(--muted); font-size:13px; margin-left:8px; font-weight:600; }
+    #clock{ color:var(--muted); font-size:13px; margin-left:8px; }
 
     .error{
       background:#fff4f6;
@@ -61,27 +58,6 @@
       display:none;
       margin-bottom:12px;
       border:1px solid rgba(155,28,28,0.08);
-      font-weight:600;
-    }
-
-    /* LOADING SPINNER - Shows while data loads */
-    .loading{
-      text-align:center;
-      padding:60px 20px;
-      color:var(--muted);
-    }
-    .spinner{
-      border:3px solid rgba(255,106,0,0.1);
-      border-top:3px solid var(--brand-orange);
-      border-radius:50%;
-      width:40px;
-      height:40px;
-      animation:spin 0.8s linear infinite;
-      margin:0 auto 16px;
-    }
-    @keyframes spin{
-      0%{ transform:rotate(0deg); }
-      100%{ transform:rotate(360deg); }
     }
 
     .grid{
@@ -160,9 +136,7 @@
       font-weight:700;
       border:1px solid rgba(255,106,0,0.12);
       cursor:pointer;
-      transition:0.2s;
     }
-    .listBtn:hover{ background:rgba(255,106,0,0.05); }
 
     .details{ margin-top:10px; display:none; font-size:14px; color:#222; }
     .details[aria-hidden="false"]{ display:block; }
@@ -183,11 +157,6 @@
       font-size:12px;
       font-weight:700;
       margin-left:6px;
-      animation:pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse{
-      0%, 100%{ opacity:1; }
-      50%{ opacity:0.7; }
     }
 
     .meta-row{
@@ -206,20 +175,6 @@
       text-align:center;
     }
 
-    /* Performance indicator */
-    .perf-indicator{
-      position:fixed;
-      bottom:10px;
-      right:10px;
-      background:rgba(255,255,255,0.95);
-      padding:8px 12px;
-      border-radius:8px;
-      font-size:11px;
-      color:var(--muted);
-      box-shadow:0 4px 12px rgba(0,0,0,0.1);
-      display:none;
-    }
-
     @media (max-width:520px){
       body{ padding:12px; }
       .grid{ grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); }
@@ -232,10 +187,11 @@
 
 <body>
 
+  <!-- HEADER -->
   <header>
     <div class="brand">
       <div class="logo">
-        <img src="baaz1.png" class="logo-img" alt="Baaz Bike Logo">
+        <img src="baaz1.png" class="logo-img" alt="Logo">
       </div>
       <div>
         <h1>Baaz Bike</h1>
@@ -252,45 +208,29 @@
   <div id="error" class="error" role="alert"></div>
 
   <main>
-    <div id="rooms" class="grid" aria-live="polite">
-      <!-- Loading spinner appears here initially -->
-      <div class="loading" style="grid-column:1/-1">
-        <div class="spinner"></div>
-        <div>Loading meeting rooms...</div>
-      </div>
-    </div>
+    <div id="rooms" class="grid" aria-live="polite"></div>
   </main>
 
   <footer>© 2025 Baaz Bike. All rights reserved.</footer>
 
-  <!-- Performance indicator (hidden by default, shows during dev) -->
-  <div id="perfIndicator" class="perf-indicator"></div>
-
   <script>
   (function(){
-    'use strict';
 
-    // ========== CONFIGURATION ==========
+    // default config & state
     let API_BASE = '/api';
     let currentData = [];
     const AUTO_REFRESH_SECONDS_DEFAULT = 10;
-    const SHOW_PERF_INDICATOR = false; // Set to true to see load times
+    const POLL_FAST_MS = 3000;   // fast per-room polling attempts (3s)
+    const POLL_SLOW_MS = 30000;  // slower polling after a few attempts (30s)
+    const POLL_FAST_ROUNDS = 4;  // number of fast repeats before slowing
 
-    // ========== HELPER FUNCTIONS ==========
-    function sanitizeId(v){ 
-      return String(v||'').replace(/[^a-z0-9\-]/gi,'-'); 
-    }
-    
-    function escapeHtml(s){ 
-      if(s===undefined||s===null) return ''; 
-      return String(s).replace(/[&"'<>]/g, c=>({ 
-        '&':'&amp;','"':'&quot;',"'":"&#39;",'<':'&lt;', '>':'&gt;' 
-      }[c])); 
-    }
-    
+    // helpers
+    function sanitizeId(v){ return String(v||'').replace(/[^a-z0-9\-]/gi,'-'); }
+    function escapeHtml(s){ if(s===undefined||s===null) return ''; return String(s).replace(/[&"'<>]/g, c=>({ '&':'&amp;','"':'&quot;',"'":"&#39;",'<':'&lt;', '>':'&gt;' }[c])); }
     function formatTurfName(n){
       if(!n) return '';
       n = String(n).trim().replace(/[-_]+/g,' ').replace(/\s+/g,' ');
+      // capitalize first letter of each word (nice on display)
       return n.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     }
 
@@ -308,13 +248,7 @@
 
     function fmtTimeTs(v){
       if(!v) return '';
-      try{ 
-        const d = new Date(Number(v)); 
-        if(isNaN(d)) return ''; 
-        return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); 
-      }catch(e){ 
-        return ''; 
-      }
+      try{ const d = new Date(Number(v)); if(isNaN(d)) return ''; return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }catch(e){ return ''; }
     }
 
     function extractOrganizer(o){
@@ -326,30 +260,16 @@
 
     function showError(msg){
       const el = document.getElementById('error');
-      if(!msg){ 
-        el.style.display='none'; 
-        el.textContent=''; 
-        return; 
-      }
+      if(!msg){ el.style.display='none'; el.textContent=''; return; }
       el.style.display='block';
       el.textContent = msg;
-    }
-
-    function showPerf(msg){
-      if(!SHOW_PERF_INDICATOR) return;
-      const el = document.getElementById('perfIndicator');
-      el.textContent = msg;
-      el.style.display = 'block';
-      setTimeout(() => { el.style.display = 'none'; }, 5000);
     }
 
     function isSameDayTs(ts){
       if(!ts) return false;
       const d = new Date(Number(ts));
       const now = new Date();
-      return d.getFullYear() === now.getFullYear() && 
-             d.getMonth() === now.getMonth() && 
-             d.getDate() === now.getDate();
+      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
     }
 
     function isTodayEvent(ev){
@@ -365,15 +285,10 @@
       return s <= now && now < e;
     }
 
-    // ========== RENDER FUNCTION ==========
+    // RENDER
     function renderRooms(data){
       const container = document.getElementById("rooms");
       container.innerHTML = "";
-
-      if(!data || data.length === 0){
-        container.innerHTML = '<div class="loading" style="grid-column:1/-1"><em>No rooms configured</em></div>';
-        return;
-      }
 
       const now = Date.now();
 
@@ -384,13 +299,14 @@
         const state = room.state || {};
         const meetingsAll = Array.isArray(state.all) ? state.all : [];
 
+        // filter only today's meetings
         const meetingsToday = meetingsAll.filter(isTodayEvent).map(m=>{
           const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
           const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
           return Object.assign({}, m, { _start_ts: s, _end_ts: e });
         }).sort((a,b) => (a._start_ts||0) - (b._start_ts||0));
 
-        // Pick top meetings to display (ongoing + next)
+        // pick top meetings to show: ongoing + next, or next two
         let topMeetings = [];
         const ongoing = meetingsToday.find(isOngoingEvent);
         if(ongoing){
@@ -460,102 +376,131 @@
       });
     }
 
-    // ========== OPTIMIZED DATA LOADING (BATCH FETCH) ==========
-    async function loadDataFast(forceFresh = true){
-      const startTime = performance.now();
-      console.log('🚀 Loading data (optimized for 21 rooms)...');
-      
+    // BATCH fetch
+    async function fetchRoomsWithState(){
+      const r = await fetch(`${API_BASE}/rooms/list-with-state`, { cache: "no-store" });
+      if(!r.ok) throw new Error('Failed to fetch rooms list-with-state: ' + r.status);
+      return await r.json();
+    }
+
+    // per-room (meetings-today)
+    async function fetchMeetingsTodayForRoom(rid){
       try{
-        // Step 1: Get list of all rooms (fast - just metadata from Redis)
-        const roomsResp = await fetch(`${API_BASE}/rooms/list-with-state`, { cache: "no-store" });
-        if(!roomsResp.ok) throw new Error('Failed to fetch rooms list');
-        const rooms = await roomsResp.json();
-        
-        // Step 2: Only show cached data on FIRST load (not on refresh)
-        if(!currentData || currentData.length === 0){
-          currentData = rooms;
-          renderRooms(currentData);
-          const loadTime1 = performance.now() - startTime;
-          console.log(`✓ Initial render: ${loadTime1.toFixed(0)}ms (cached data)`);
-        }
-        
-        // Step 3: ALWAYS fetch FRESH data from Google Calendar
-        const roomIds = rooms.map(r => r.id || r.name).filter(Boolean);
-        
-        if(roomIds.length > 0){
-          console.log(`📦 Batch fetching ${roomIds.length} rooms FRESH data...`);
-          
-          const batchResp = await fetch(`${API_BASE}/rooms/batch-meetings-today`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              room_ids: roomIds,
-              force_fresh: forceFresh  // Always get fresh data
-            }),
-            cache: "no-store"
-          });
-          
-          if(batchResp.ok){
-            const batchData = await batchResp.json();
-            
-            // Step 4: Merge FRESH batch data into rooms
-            let updatedCount = 0;
-            rooms.forEach(room => {
-              const rid = room.id || room.name;
-              if(batchData[rid]){
-                room.state = room.state || {};
-                room.state.all = batchData[rid];
-                room.state.last_success = new Date().toISOString();
-                updatedCount++;
-              }
-            });
-            
-            // Step 5: Update currentData and re-render with FRESH data
-            currentData = rooms;
-            renderRooms(currentData);
-            
-            const loadTime2 = performance.now() - startTime;
-            console.log(`✓ FRESH data loaded: ${loadTime2.toFixed(0)}ms (${updatedCount} rooms updated)`);
-            showPerf(`Updated in ${loadTime2.toFixed(0)}ms`);
-          } else {
-            console.warn('Batch fetch failed, retrying...');
-            // Retry once after 2 seconds
-            setTimeout(() => loadDataFast(true), 2000);
-          }
-        }
-        
-        showError(null);
-        
+        const url = `${API_BASE.replace(/\/$/,'')}/rooms/${encodeURIComponent(rid)}/meetings-today`;
+        const resp = await fetch(url, { cache: "no-store" });
+        if(!resp.ok) return null;
+        const data = await resp.json();
+        return Array.isArray(data) ? data : null;
       }catch(e){
-        showError("Failed to load meeting data. Retrying...");
-        console.error('Load error:', e);
-        // Retry after 5 seconds
-        setTimeout(() => loadDataFast(true), 5000);
+        console.warn('per-room fetch failed for', rid, e);
+        return null;
       }
     }
 
-    // ========== TOGGLE MEETING DETAILS ==========
+    // adaptive per-room pollers
+    const pollers = {};
+    function stopPoller(rid){
+      if(!pollers[rid]) return;
+      clearInterval(pollers[rid].timer);
+      delete pollers[rid];
+    }
+    function startPollerForRoom(rid){
+      if(!rid) return;
+      if(pollers[rid]) return; // already running
+      pollers[rid] = { attempts: 0, timer: null };
+
+      async function attempt(){
+        pollers[rid].attempts++;
+        const data = await fetchMeetingsTodayForRoom(rid);
+        if(Array.isArray(data) && data.filter(isTodayEvent).length > 0){
+          // merge into currentData and re-render
+          let idx = (currentData||[]).findIndex(r => String(r.id) === String(rid) || String(r.calendarId) === String(rid) || String(r.name) === String(rid));
+          if(idx < 0){
+            currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: data, last_success: new Date().toISOString() } });
+          } else {
+            currentData[idx].state = currentData[idx].state || {};
+            currentData[idx].state.all = data;
+            currentData[idx].state.last_success = new Date().toISOString();
+          }
+          renderRooms(currentData);
+          stopPoller(rid);
+          return true;
+        }
+        return false;
+      }
+
+      // immediate try
+      attempt();
+
+      // set repeating timer: fast attempts for a few rounds, then slow down
+      pollers[rid].timer = setInterval(async ()=>{
+        if(pollers[rid].attempts >= POLL_FAST_ROUNDS){
+          clearInterval(pollers[rid].timer);
+          pollers[rid].timer = setInterval(async ()=>{
+            pollers[rid].attempts++;
+            const ok = await attempt();
+            if(ok || pollers[rid].attempts > 40) stopPoller(rid);
+          }, POLL_SLOW_MS);
+        } else {
+          pollers[rid].attempts++;
+          const ok = await attempt();
+          if(ok) stopPoller(rid);
+        }
+      }, POLL_FAST_MS);
+    }
+
+    // MAIN loading routine (batch + per-room fallback)
+    async function loadData(){
+      try{
+        const rooms = await fetchRoomsWithState();
+        const enriched = rooms.map(room => ({ id: room.id, name: room.name, calendarId: room.calendarId, state: room.state || {} }));
+
+        // for rooms with missing today data, do a one-shot per-room fetch
+        const base = (typeof API_BASE === 'string' && API_BASE.trim()) ? API_BASE.replace(/\/$/,'') : '/api';
+        const missing = enriched.filter(r => !(r.state && Array.isArray(r.state.all) && r.state.all.length > 0));
+        if(missing.length){
+          await Promise.all(missing.map(async r=>{
+            try{
+              const data = await fetchMeetingsTodayForRoom(r.id);
+              if(Array.isArray(data) && data.filter(isTodayEvent).length > 0){
+                r.state = r.state || {};
+                r.state.all = data;
+                r.state.last_success = new Date().toISOString();
+              }
+            }catch(e){ /* ignore */ }
+          }));
+        }
+
+        currentData = enriched;
+        renderRooms(currentData);
+
+        // start pollers for any still-empty rooms
+        enriched.forEach(r=>{
+          const has = r.state && Array.isArray(r.state.all) && r.state.all.length > 0 && r.state.all.some(isTodayEvent);
+          if(!has) startPollerForRoom(r.id);
+          else stopPoller(r.id);
+        });
+
+      }catch(e){
+        showError("Failed to load data");
+        console.error(e);
+      }
+    }
+
+    // Toggle details (show full meetings) - uses cached data already loaded
     document.addEventListener("click", async e=>{
       if(e.target.classList.contains("listBtn")){
         const id = e.target.dataset.id;
         const safeId = e.target.dataset.safeid || sanitizeId(id);
         const div = document.getElementById(`details-${safeId}`);
         const open = div.getAttribute("aria-hidden") === "false";
-        
         if(open){
           div.setAttribute("aria-hidden","true");
           div.innerHTML = "";
         } else {
-          const room = currentData.find(r=>
-            String(r.calendarId)==String(id) || 
-            String(r.id)===String(id) || 
-            String(r.name)===String(id)
-          );
-          
-          let meetings = room && room.state && Array.isArray(room.state.all) 
-            ? room.state.all.filter(isTodayEvent) 
-            : [];
-          
+          // open — show full meetings for the day (sorted)
+          const room = currentData.find(r=>String(r.calendarId)==String(id) || String(r.id)===String(id) || String(r.name)===String(id));
+          let meetings = room && room.state && Array.isArray(room.state.all) ? room.state.all.filter(isTodayEvent) : [];
           meetings = (meetings || []).map(m=>{
             const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
             const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
@@ -564,9 +509,7 @@
 
           if(meetings.length){
             div.innerHTML = meetings.map(m=>{
-              const ongoingMark = isOngoingEvent(m) 
-                ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' 
-                : '';
+              const ongoingMark = isOngoingEvent(m) ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' : '';
               return `
                 <div class="meeting">
                   <strong>${escapeHtml(m.title)}</strong>
@@ -577,34 +520,26 @@
               `;
             }).join('');
           } else {
-            div.innerHTML = "<em>No meetings today</em>";
+            div.innerHTML = "<em>No meetings</em>";
           }
           div.setAttribute("aria-hidden","false");
         }
       }
     });
 
-    // ========== BOOK NOW BUTTON ==========
-    document.getElementById("bookNow").addEventListener("click", function(){ 
-      window.open("https://calendar.google.com/calendar/u/0/r/eventedit", "_blank"); 
-    });
+    // Book Now
+    document.getElementById("bookNow").addEventListener("click", function(){ window.open("https://calendar.google.com/calendar/u/0/r/eventedit", "_blank"); });
 
-    // ========== CLOCK UPDATE ==========
-    function updateClock(){
-      const now = new Date();
-      document.getElementById("clock").textContent = now.toLocaleString();
-    }
-    updateClock();
-    setInterval(updateClock, 1000);
+    // Clock
+    setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleString(); },1000);
 
-    // ========== SOCKET.IO + INITIALIZATION ==========
+    // Socket + init
     (async function init(){
-      console.log('🎯 Baaz Bike Meeting Dashboard - Optimized for 21 Rooms');
-      
-      // Load configuration
+      // defaults
       let cfg = {
         API_URL: "/api",
         REFRESH_INTERVAL_SECONDS: AUTO_REFRESH_SECONDS_DEFAULT,
+        SHOW_LOGO: true,
         AUTO_REFRESH: true
       };
 
@@ -614,72 +549,76 @@
           const parsed = await resp.json();
           cfg = Object.assign(cfg, parsed);
         }
-      }catch(e){
-        console.log('No config.json, using defaults');
-      }
+      }catch(e){ /* ignore */ }
 
-      API_BASE = (cfg.API_URL && String(cfg.API_URL).trim()) 
-        ? cfg.API_URL.trim() 
-        : API_BASE;
+      API_BASE = (cfg.API_URL && String(cfg.API_URL).trim()) ? cfg.API_URL.trim() : API_BASE;
 
-      // Initialize Socket.IO for real-time updates
+      // try socket.io (if backend serves it)
       try{
         const parsed = new URL(API_BASE, window.location.origin);
-        const socket = io(parsed.origin + '/rooms', { 
-          transports:['websocket','polling'] 
-        });
+        const socket = io(parsed.origin + '/rooms', { transports:['websocket','polling'] });
 
-        socket.on('connect', ()=> {
-          console.log('✓ Socket.IO connected:', socket.id);
-        });
-        
-        socket.on('disconnect', ()=> {
-          console.warn('✗ Socket.IO disconnected');
-        });
+        socket.on('connect', ()=> console.log('socket connected', socket.id));
+        socket.on('disconnect', ()=> console.warn('socket disconnected'));
 
         socket.on('room_state', async payload=>{
           try{
             if(!payload || !payload.room_id) return;
             const rid = String(payload.room_id);
-            
-            // Update room state in current data
-            const idx = (currentData||[]).findIndex(r => 
-              String(r.id) === rid || 
-              String(r.calendarId) === rid || 
-              String(r.name) === rid
-            );
-            
-            if(idx >= 0){
-              currentData[idx].state = payload.state || {};
+            // authoritative per-room fetch on state change (prefer server's meetings-today)
+            try{
+              const data = await fetchMeetingsTodayForRoom(rid);
+              const todayOnly = Array.isArray(data) ? data.filter(isTodayEvent) : [];
+              const idx = (currentData||[]).findIndex(r => String(r.id) === rid || String(r.calendarId) === rid || String(r.name) === rid);
+              if(idx >= 0){
+                currentData[idx].state = currentData[idx].state || {};
+                currentData[idx].state.all = todayOnly;
+                currentData[idx].state.last_success = new Date().toISOString();
+              } else {
+                currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: todayOnly, last_success: new Date().toISOString() } });
+              }
               renderRooms(currentData);
-              console.log(`✓ Real-time update: ${rid}`);
+              stopPoller(rid);
+              return;
+            }catch(e){ console.warn('socket per-room fetch failed', e); }
+
+            // fallback - merge payload.state
+            const idx2 = (currentData||[]).findIndex(r => String(r.id) === String(payload.room_id) || String(r.calendarId) === String(payload.room_id) || String(r.name) === String(payload.room_id));
+            if(idx2 >= 0){
+              currentData[idx2].state = payload.state;
+              renderRooms(currentData);
+            } else {
+              currentData.push({ id: payload.room_id, name: payload.room_id, calendarId: payload.room_id, state: payload.state || {} });
+              renderRooms(currentData);
             }
-          }catch(e){ 
-            console.warn('room_state handler error:', e); 
-          }
+          }catch(e){ console.warn('room_state handler failed', e); }
         });
 
         socket.on('rooms_updated', ()=> {
-          console.log('✓ Rooms updated - reloading FRESH data...');
-          if(typeof loadDataFast === 'function') loadDataFast(true);  // Force fresh
+          if(typeof loadData === 'function') loadData();
         });
 
       }catch(e){
-        console.warn('Socket.IO init failed (will use polling only):', e);
+        console.warn('socket init failed (will use polling)', e);
       }
 
-      // Initial fast load (CRITICAL FOR PERFORMANCE)
-      await loadDataFast();
-      
-      // Periodic refresh
+      // initial load + periodic batch refresh
+      await loadData();
       if(cfg.AUTO_REFRESH && Number(cfg.REFRESH_INTERVAL_SECONDS) > 0){
-        const intervalMs = Number(cfg.REFRESH_INTERVAL_SECONDS) * 1000;
-        console.log(`✓ Auto-refresh enabled: every ${cfg.REFRESH_INTERVAL_SECONDS}s`);
-        setInterval(loadDataFast, intervalMs);
+        setInterval(loadData, Number(cfg.REFRESH_INTERVAL_SECONDS) * 1000);
       }
-      
-      console.log('✓ Dashboard initialized successfully');
     })();
+
+    // Helper available to console (also injected server-side earlier)
+    window.refreshRoomAndReload = async function(roomId){
+      try{
+        if(!roomId) return;
+        const base = (typeof API_BASE === "string" && API_BASE.trim()) ? API_BASE.replace(/\/$/,"") : "/api";
+        await fetch(`${base}/rooms/${encodeURIComponent(roomId)}/state`, { method: "GET", cache: "no-store" }).catch(()=>null);
+        if(typeof loadData === 'function') await loadData();
+        console.info('refreshRoomAndReload done for', roomId);
+      }catch(e){ console.warn('refreshRoomAndReload failed', e); }
+    };
 
   })();
   </script>
