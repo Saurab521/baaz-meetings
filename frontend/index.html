@@ -461,7 +461,7 @@
     }
 
     // ========== OPTIMIZED DATA LOADING (BATCH FETCH) ==========
-    async function loadDataFast(){
+    async function loadDataFast(forceFresh = true){
       const startTime = performance.now();
       console.log('🚀 Loading data (optimized for 21 rooms)...');
       
@@ -471,32 +471,36 @@
         if(!roomsResp.ok) throw new Error('Failed to fetch rooms list');
         const rooms = await roomsResp.json();
         
-        // Step 2: Immediately render with cached state (shows something fast)
-        currentData = rooms;
-        renderRooms(currentData);
+        // Step 2: Only show cached data on FIRST load (not on refresh)
+        if(!currentData || currentData.length === 0){
+          currentData = rooms;
+          renderRooms(currentData);
+          const loadTime1 = performance.now() - startTime;
+          console.log(`✓ Initial render: ${loadTime1.toFixed(0)}ms (cached data)`);
+        }
         
-        const loadTime1 = performance.now() - startTime;
-        console.log(`✓ Initial render: ${loadTime1.toFixed(0)}ms (cached data)`);
-        
-        // Step 3: Fetch ALL meetings in parallel using batch endpoint
+        // Step 3: ALWAYS fetch FRESH data from Google Calendar
         const roomIds = rooms.map(r => r.id || r.name).filter(Boolean);
         
         if(roomIds.length > 0){
-          console.log(`📦 Batch fetching ${roomIds.length} rooms in parallel...`);
+          console.log(`📦 Batch fetching ${roomIds.length} rooms FRESH data...`);
           
           const batchResp = await fetch(`${API_BASE}/rooms/batch-meetings-today`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ room_ids: roomIds }),
+            body: JSON.stringify({ 
+              room_ids: roomIds,
+              force_fresh: forceFresh  // Always get fresh data
+            }),
             cache: "no-store"
           });
           
           if(batchResp.ok){
             const batchData = await batchResp.json();
             
-            // Step 4: Merge batch data into rooms
+            // Step 4: Merge FRESH batch data into rooms
             let updatedCount = 0;
-            currentData.forEach(room => {
+            rooms.forEach(room => {
               const rid = room.id || room.name;
               if(batchData[rid]){
                 room.state = room.state || {};
@@ -506,14 +510,17 @@
               }
             });
             
-            // Step 5: Re-render with fresh data
+            // Step 5: Update currentData and re-render with FRESH data
+            currentData = rooms;
             renderRooms(currentData);
             
             const loadTime2 = performance.now() - startTime;
-            console.log(`✓ Full load complete: ${loadTime2.toFixed(0)}ms (${updatedCount} rooms updated)`);
-            showPerf(`Loaded in ${loadTime2.toFixed(0)}ms`);
+            console.log(`✓ FRESH data loaded: ${loadTime2.toFixed(0)}ms (${updatedCount} rooms updated)`);
+            showPerf(`Updated in ${loadTime2.toFixed(0)}ms`);
           } else {
-            console.warn('Batch fetch failed, using cached data');
+            console.warn('Batch fetch failed, retrying...');
+            // Retry once after 2 seconds
+            setTimeout(() => loadDataFast(true), 2000);
           }
         }
         
@@ -522,6 +529,8 @@
       }catch(e){
         showError("Failed to load meeting data. Retrying...");
         console.error('Load error:', e);
+        // Retry after 5 seconds
+        setTimeout(() => loadDataFast(true), 5000);
       }
     }
 
@@ -651,8 +660,8 @@
         });
 
         socket.on('rooms_updated', ()=> {
-          console.log('✓ Rooms updated - reloading...');
-          if(typeof loadDataFast === 'function') loadDataFast();
+          console.log('✓ Rooms updated - reloading FRESH data...');
+          if(typeof loadDataFast === 'function') loadDataFast(true);  // Force fresh
         });
 
       }catch(e){

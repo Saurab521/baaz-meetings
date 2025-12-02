@@ -564,10 +564,12 @@ def api_batch_meetings_today():
     """
     Fetch meetings for multiple rooms in parallel.
     Endpoint for 21 rooms: reduces 42s serial to 2-3s parallel
+    ALWAYS fetches fresh data - no stale cache!
     """
     try:
         data = request.get_json()
         room_ids = data.get("room_ids", []) if data else []
+        force_fresh = data.get("force_fresh", True) if data else True  # Default to fresh
         
         if not room_ids:
             return jsonify({})
@@ -579,25 +581,29 @@ def api_batch_meetings_today():
             if not calendar_id:
                 return (rid, [])
             
-            # Check cache first
-            cache_key = f"room:{rid}:meetings_today"
-            try:
-                if r:
-                    cached = r.get(cache_key)
-                    if cached:
-                        return (rid, json.loads(cached))
-            except Exception:
-                pass
+            # Check cache ONLY if not forcing fresh
+            if not force_fresh:
+                cache_key = f"room:{rid}:meetings_today"
+                try:
+                    if r:
+                        cached = r.get(cache_key)
+                        if cached:
+                            app.logger.debug(f"Cache HIT for {rid}")
+                            return (rid, json.loads(cached))
+                except Exception:
+                    pass
             
-            # Fetch from Google Calendar
+            # Fetch FRESH data from Google Calendar
             try:
+                app.logger.debug(f"Fetching FRESH data for {rid}")
                 raw_events = fetch_full_day_events(calendar_id)
                 normalized = [normalize_event(ev) for ev in raw_events if normalize_event(ev)]
                 normalized.sort(key=lambda ev: ev.get("start_ts") or 0)
                 
-                # Cache the result
+                # Cache the fresh result (short TTL)
                 try:
                     if r:
+                        cache_key = f"room:{rid}:meetings_today"
                         r.set(cache_key, json.dumps(normalized), ex=MEETINGS_CACHE_TTL)
                 except Exception:
                     pass
