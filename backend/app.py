@@ -1,7 +1,6 @@
-# app.py - VERIFIED FIX with HARD-CODED values
-# This version doesn't rely on environment variables
-
+# app.py - Meeting display backend (eventlet-safe + immediate end detection)
 import eventlet
+# IMPORTANT: patch before stdlib network imports
 eventlet.monkey_patch()
 
 import os
@@ -18,6 +17,7 @@ from flask_socketio import SocketIO
 import redis
 from dateutil import parser as dateparser
 
+# Optional libs
 try:
     from flask_compress import Compress
     FLASK_COMPRESS_AVAILABLE = True
@@ -25,6 +25,7 @@ except Exception:
     Compress = None
     FLASK_COMPRESS_AVAILABLE = False
 
+# Eventlet availability & semaphore
 try:
     from eventlet.semaphore import Semaphore as EventletSemaphore
     EVENTLET_AVAILABLE = True
@@ -32,6 +33,7 @@ except Exception:
     EventletSemaphore = None
     EVENTLET_AVAILABLE = False
 
+# Google libs optional
 GOOGLE_LIBS_AVAILABLE = False
 try:
     from google.oauth2 import service_account
@@ -40,7 +42,7 @@ try:
 except Exception:
     GOOGLE_LIBS_AVAILABLE = False
 
-# ---------- CONFIG ----------
+# ---------- CONFIG (env override) ----------
 CALENDARS_JSON = os.getenv("CALENDARS_JSON", "[]")
 try:
     CALENDARS = json.loads(CALENDARS_JSON)
@@ -49,27 +51,30 @@ try:
 except Exception:
     CALENDARS = []
 
-# HARD-CODED: Poll every 10 seconds (not 30!)
-POLL_INTERVAL = 10
-
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds between polls
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SA_FILE", "/secrets/google-sa.json")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
+# Prevent flicker: number of polls required to flip occupied status
 STABILITY_THRESHOLD = int(os.getenv("STABILITY_THRESHOLD", "2"))
-MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))
 
-# HARD-CODED: 21 rooms concurrency
-MAX_CALENDAR_CONCURRENCY = 21
+MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))  # seconds
+try:
+    MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "6"))
+except Exception:
+    MAX_CALENDAR_CONCURRENCY = 6
 
+# Leader lock settings (so only one worker performs polling)
 LEADER_LOCK_KEY = os.getenv("LEADER_LOCK_KEY", "meeting_display:leader")
-LEADER_LOCK_TTL = int(os.getenv("LEADER_LOCK_TTL", "60"))
-LEADER_RENEW_INTERVAL = int(os.getenv("LEADER_RENEW_INTERVAL", "25"))
+LEADER_LOCK_TTL = int(os.getenv("LEADER_LOCK_TTL", "60"))  # seconds
+LEADER_RENEW_INTERVAL = int(os.getenv("LEADER_RENEW_INTERVAL", "25"))  # seconds renewal interval
 
 APP_INSTANCE_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 # ---------- FLASK / SOCKET.IO ----------
 app = Flask(__name__, static_folder="/frontend")
+# Use eventlet async mode so Socket.IO and gunicorn/eventlet are consistent
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 if FLASK_COMPRESS_AVAILABLE:
@@ -77,16 +82,16 @@ if FLASK_COMPRESS_AVAILABLE:
         Compress(app)
         app.logger.info("Flask-Compress enabled.")
     except Exception as e:
-        app.logger.warning("Flask-Compress failed: %s", e)
+        app.logger.warning("Flask-Compress failed to enable: %s", e)
 
 # ---------- REDIS ----------
 r = None
 try:
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
     r.ping()
-    app.logger.info("✓ Redis connected (%s:%s)", REDIS_HOST, REDIS_PORT)
+    app.logger.info("Connected to Redis (%s:%s)", REDIS_HOST, REDIS_PORT)
 except Exception as e:
-    app.logger.warning("✗ Redis unavailable: %s", e)
+    app.logger.warning("Redis not available: %s", e)
     r = None
 
 # ---------- GOOGLE CLIENT ----------
@@ -98,29 +103,22 @@ if GOOGLE_LIBS_AVAILABLE and os.path.exists(SERVICE_ACCOUNT_FILE):
             scopes=["https://www.googleapis.com/auth/calendar.readonly"],
         )
         calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-        app.logger.info("✓ Google Calendar client initialized")
+        app.logger.info("Google Calendar client initialized.")
     except Exception as e:
-        app.logger.warning("✗ Google client failed: %s", e)
+        app.logger.warning("Google client init failed: %s", e)
         calendar_service = None
 else:
-    app.logger.warning("✗ Google libs/service account missing")
+    app.logger.warning("Google libs / service account missing or path not found.")
 
-# ---------- CRITICAL FIX: FORCE PARALLEL FETCHING ----------
-# HARD-CODED to 21 - ignores environment variables!
-EFFECTIVE_CALENDAR_CONCURRENCY = 21  # ← FORCED TO 21!
-
+# ---------- Calendar concurrency control ----------
+# When using eventlet, serialize calendar reads to avoid "Second simultaneous read on fileno"
 if EVENTLET_AVAILABLE and EventletSemaphore is not None:
-    calendar_lock = EventletSemaphore(21)  # ← FORCED TO 21!
-    app.logger.info("✓ Using EventletSemaphore with concurrency=21")
+    EFFECTIVE_CALENDAR_CONCURRENCY = 1
+    calendar_lock = EventletSemaphore(1)
 else:
+    EFFECTIVE_CALENDAR_CONCURRENCY = MAX_CALENDAR_CONCURRENCY
     from threading import BoundedSemaphore
-    calendar_lock = BoundedSemaphore(21)  # ← FORCED TO 21!
-    app.logger.info("✓ Using BoundedSemaphore with concurrency=21")
-
-app.logger.info("="*60)
-app.logger.info("CALENDAR FETCH CONCURRENCY: %d (for %d rooms)", 21, len(CALENDARS))
-app.logger.info("POLL INTERVAL: %d seconds", POLL_INTERVAL)
-app.logger.info("="*60)
+    calendar_lock = BoundedSemaphore(EFFECTIVE_CALENDAR_CONCURRENCY)
 
 # ---------- Helpers ----------
 def now_utc() -> datetime:
@@ -155,6 +153,7 @@ def calendar_id_for_room(room_id: str) -> Optional[str]:
             pass
     return None
 
+# ---------- Event normalization ----------
 def normalize_event(ev):
     if not ev or not isinstance(ev, dict):
         return None
@@ -165,6 +164,7 @@ def normalize_event(ev):
     sdt = parse_dt(start_str) if start_str else None
     edt = parse_dt(end_str) if end_str else None
     try:
+        # handle all-day exclusive end by subtracting 1 second
         if edt and end_str and 'T' not in end_str:
             edt = edt - timedelta(seconds=1)
     except Exception:
@@ -200,6 +200,7 @@ def build_summary(events, count=2):
         })
     return summary, len(events)
 
+# ---------- Stability and Redis state ----------
 def get_prev_state(room_key):
     try:
         if not r:
@@ -225,6 +226,8 @@ def apply_stability(room_key, computed_state):
     prev_stable = int(prev.get("_stable", 0))
     instant_status = bool(computed_state["occupied"])
 
+    # Immediate clear: if we previously thought room was occupied and the previous 'current'
+    # event has actually ended (based on stored end_ts), clear immediately.
     try:
         prev_current = prev.get("current") or {}
         prev_end_ts = int(prev_current.get("end_ts")) if prev_current and prev_current.get("end_ts") else None
@@ -245,8 +248,10 @@ def apply_stability(room_key, computed_state):
             save_state(room_key, final_state)
             return final_state
     except Exception:
+        # if something goes wrong here, fall back to normal stability logic below
         pass
 
+    # Normal stability logic (prevent flicker)
     if instant_status == prev_status:
         stable_value = prev_stable + 1
         final_status = instant_status
@@ -273,6 +278,7 @@ def apply_stability(room_key, computed_state):
     save_state(room_key, final_state)
     return final_state
 
+# ---------- Google fetch with retry ----------
 def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
     if calendar_service is None:
         return []
@@ -280,6 +286,7 @@ def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
     try:
         calendar_lock.acquire()
         acquired = True
+        # Use googleapiclient's execute(num_retries=...) when available
         try:
             result = calendar_service.events().list(
                 calendarId=calendar_id,
@@ -290,6 +297,7 @@ def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
                 maxResults=250,
             ).execute(num_retries=3)
         except TypeError:
+            # older client versions: fallback without num_retries
             try:
                 result = calendar_service.events().list(
                     calendarId=calendar_id,
@@ -321,6 +329,7 @@ def fetch_full_day_events(calendar_id: str):
     end_iso = end_day.isoformat().replace("+00:00", "Z")
     return fetch_events_for_range(calendar_id, start_iso, end_iso)
 
+# ---------- Compute normalized state ----------
 def compute_normalized_state(raw_events):
     normalized = []
     for ev in raw_events:
@@ -335,6 +344,7 @@ def compute_normalized_state(raw_events):
         st = ev.get("start_ts")
         en = ev.get("end_ts")
         if st and en:
+            # treat end as exclusive with 1s grace to avoid lingering "ONGOING" at exact end
             if st <= now_ms < (en - 1000):
                 current = ev
             elif st > now_ms and next_ev is None:
@@ -349,6 +359,7 @@ def compute_normalized_state(raw_events):
         "next_count": next_count
     }
 
+# ---------- Poller worker (parallel / eventlet-safe) ----------
 def process_one_calendar(room):
     rid = room.get("id") or room.get("name")
     cal = room.get("calendarId")
@@ -359,47 +370,47 @@ def process_one_calendar(room):
         raw_events = fetch_full_day_events(cal)
         computed_state = compute_normalized_state(raw_events)
         final_state = apply_stability(rid, computed_state)
+        # cache meetings_today
         try:
             if r:
                 key = f"room:{rid}:meetings_today"
                 r.set(key, json.dumps(final_state.get("all", [])), ex=MEETINGS_CACHE_TTL)
         except Exception:
             pass
+        # emit socket
         try:
             socketio.emit("room_state", {"room_id": rid, "state": final_state}, namespace="/rooms")
         except Exception:
             pass
         duration = time.time() - start_time
-        app.logger.debug("✓ Polled %s in %.2fs -> occupied=%s, meetings=%d", 
-                        rid, duration, final_state["occupied"], len(final_state.get("all", [])))
+        app.logger.debug("Polled %s in %.2fs -> occupied=%s next=%s", rid, duration, final_state["occupied"], bool(final_state["next"]))
     except Exception as e:
-        app.logger.exception("✗ Error polling %s: %s", rid, e)
+        app.logger.exception("process_one_calendar error for %s: %s", rid, e)
 
 def poll_all_calendars_once():
     if not CALENDARS:
         app.logger.debug("No calendars configured.")
         return
 
-    poll_start = time.time()
-    max_workers = min(21, max(1, len(CALENDARS)))  # Force 21
+    max_workers = min(EFFECTIVE_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
 
     if EVENTLET_AVAILABLE:
+        # use eventlet GreenPool but limit to EFFECTIVE_CALENDAR_CONCURRENCY (likely 1)
         try:
             from eventlet.greenpool import GreenPool
             pool = GreenPool(size=max_workers)
             for room in CALENDARS:
                 pool.spawn_n(process_one_calendar, room)
             pool.waitall()
-            poll_duration = time.time() - poll_start
-            app.logger.info("✓ Polled ALL %d rooms in %.2fs (parallel)", len(CALENDARS), poll_duration)
         except Exception as e:
-            app.logger.exception("GreenPool failed: %s", e)
+            app.logger.exception("GreenPool failed, falling back to sequential poll: %s", e)
             for room in CALENDARS:
                 try:
                     process_one_calendar(room)
                 except Exception:
-                    pass
+                    app.logger.exception("Sequential poll error for room: %s", room)
     else:
+        # fallback to ThreadPoolExecutor when eventlet is not available
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(process_one_calendar, room) for room in CALENDARS]
@@ -409,15 +420,15 @@ def poll_all_calendars_once():
                 except Exception as e:
                     app.logger.exception("Poll worker exception: %s", e)
 
-# [Rest of the code stays EXACTLY the same as your original...]
-# Keeping all the leader lock, API endpoints, etc. unchanged
-
+# ---------- Leader lock (redis) ----------
 def try_acquire_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
     if not r:
+        app.logger.debug("No redis; assuming leader on this instance.")
         return True
     try:
         return r.set(LEADER_LOCK_KEY, instance_id, nx=True, ex=ttl)
     except Exception:
+        app.logger.exception("Leader lock acquire error")
         return False
 
 def renew_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
@@ -434,6 +445,7 @@ def renew_leader_lock(instance_id: str, ttl=LEADER_LOCK_TTL) -> bool:
         res = r.eval(lua, 1, LEADER_LOCK_KEY, instance_id, ttl)
         return bool(res)
     except Exception:
+        app.logger.exception("Leader lock renew error")
         return False
 
 def release_leader_lock(instance_id: str):
@@ -449,26 +461,28 @@ def release_leader_lock(instance_id: str):
         """
         r.eval(lua, 1, LEADER_LOCK_KEY, instance_id)
     except Exception:
-        pass
+        app.logger.exception("Leader lock release error")
 
+# ---------- Poller runner (leader-based) ----------
 _poller_thread = None
 _poller_stop_event = threading.Event()
 
 def poller_leader_loop():
     instance_id = APP_INSTANCE_ID
-    app.logger.info("Poller starting (instance=%s)", instance_id)
+    app.logger.info("Poller leader loop starting (instance=%s)", instance_id)
     got_lock = try_acquire_leader_lock(instance_id)
     if not got_lock:
-        app.logger.info("Not leader - exiting")
+        app.logger.info("Not leader (another instance holds lock). Poller leader loop exiting.")
         return
 
     try:
-        app.logger.info("✓ Leadership acquired by %s", instance_id)
+        app.logger.info("Leadership acquired by %s", instance_id)
         last_renew = time.time()
+        # First do an immediate poll
         try:
             poll_all_calendars_once()
         except Exception:
-            app.logger.exception("Initial poll failed")
+            app.logger.exception("Initial poll (leader) failed")
 
         while not _poller_stop_event.is_set():
             start = time.time()
@@ -487,7 +501,7 @@ def poller_leader_loop():
                 if time.time() - last_renew >= LEADER_RENEW_INTERVAL:
                     ok = renew_leader_lock(instance_id)
                     if not ok:
-                        app.logger.warning("Leader lock renew failed")
+                        app.logger.warning("Leader lock renew failed; losing leadership.")
                         _poller_stop_event.set()
                         break
                     last_renew = time.time()
@@ -496,16 +510,17 @@ def poller_leader_loop():
             release_leader_lock(instance_id)
         except Exception:
             pass
-        app.logger.info("Poller exiting")
+        app.logger.info("Poller leader loop exiting for instance %s", instance_id)
 
 def start_leader_poller_thread():
     global _poller_thread, _poller_stop_event
     if _poller_thread and _poller_thread.is_alive():
+        app.logger.info("Poller thread already running.")
         return
     _poller_stop_event.clear()
     _poller_thread = threading.Thread(target=poller_leader_loop, daemon=True, name="leader-poller")
     _poller_thread.start()
-    app.logger.info("✓ Poller thread started")
+    app.logger.info("Leader poller thread started (instance %s)", APP_INSTANCE_ID)
 
 def stop_leader_poller_thread():
     global _poller_thread, _poller_stop_event
@@ -513,7 +528,9 @@ def stop_leader_poller_thread():
         _poller_stop_event.set()
         _poller_thread.join(timeout=5)
         _poller_thread = None
+        app.logger.info("Poller thread stopped.")
 
+# ---------- API endpoints ----------
 @app.route("/api/rooms")
 def api_rooms():
     return jsonify(CALENDARS)
@@ -590,13 +607,15 @@ def api_list_with_state():
         })
     return jsonify(output)
 
+# ---------- Static frontend serving (no cache) ----------
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_frontend(path):
     static_root = app.static_folder or "/frontend"
     fullpath = os.path.join(static_root, path)
     if path and os.path.exists(fullpath):
-        return send_from_directory(static_root, path)
+        resp = send_from_directory(static_root, path)
+        return resp
     index = os.path.join(static_root, "index.html")
     if os.path.exists(index):
         with open(index, 'rb') as fh:
@@ -611,6 +630,7 @@ def serve_frontend(path):
         return resp
     return jsonify({"status": "ok", "message": "frontend missing"})
 
+# ---------- Health / version ----------
 @app.route("/_health")
 def health():
     return jsonify({
@@ -618,15 +638,14 @@ def health():
         "redis": bool(r is not None),
         "google_client": bool(calendar_service is not None),
         "calendars_count": len(CALENDARS),
-        "concurrency": 21,  # Hard-coded
-        "poll_interval": POLL_INTERVAL,
         "time": iso_now()
     })
 
 @app.route("/_version")
 def version():
-    return jsonify({"app": "meeting-display-backend", "version": "1.2-hardcoded-fast", "time": iso_now()})
+    return jsonify({"app": "meeting-display-backend", "version": "1.0.0", "time": iso_now()})
 
+# ---------- Startup / Scheduler ----------
 def start_external_scheduler_if_any():
     try:
         from scheduler import start_scheduler as _ss
@@ -634,23 +653,24 @@ def start_external_scheduler_if_any():
             _ss()
             app.logger.info("External scheduler started.")
         except Exception:
-            pass
+            app.logger.exception("External scheduler failed to start")
     except Exception:
-        pass
+        app.logger.debug("No external scheduler module available (skipping).")
 
 def start_background_services():
     try:
         start_external_scheduler_if_any()
     except Exception:
         pass
+
     try:
         start_leader_poller_thread()
     except Exception:
-        app.logger.exception("Failed to start poller")
+        app.logger.exception("Failed to start leader poller thread")
 
 def _background_initial_poll():
     try:
-        app.logger.info("Initial poll starting...")
+        app.logger.info("Background initial one-shot poll starting...")
         instance_id = APP_INSTANCE_ID
         got_lock = try_acquire_leader_lock(instance_id, ttl=LEADER_LOCK_TTL)
         if got_lock:
@@ -658,22 +678,25 @@ def _background_initial_poll():
                 poll_all_calendars_once()
             finally:
                 release_leader_lock(instance_id)
-        app.logger.info("✓ Initial poll complete")
+        else:
+            app.logger.debug("Initial poll skipped (not leader).")
+        app.logger.info("Background initial one-shot poll finished.")
     except Exception:
-        app.logger.exception("Initial poll failed")
+        app.logger.exception("Background initial one-shot poll failed.")
 
 try:
     threading.Thread(target=_background_initial_poll, daemon=True, name="initial-poller").start()
 except Exception:
-    app.logger.exception("Failed to spawn initial poll")
+    app.logger.exception("Failed to spawn initial poll thread")
 
 try:
     start_background_services()
 except Exception:
     app.logger.exception("Failed to start background services")
 
+# If run directly, start socketio (useful for dev)
 if __name__ == "__main__":
     try:
         socketio.run(app, host="0.0.0.0", port=8000, debug=False)
     except Exception:
-        app.logger.exception("Failed to run app")
+        app.logger.exception("Failed to run app via socketio")
