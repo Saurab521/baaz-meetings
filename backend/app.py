@@ -51,7 +51,7 @@ try:
 except Exception:
     CALENDARS = []
 
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds between polls
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "120"))  # seconds between polls - reduced from 30s to 120s for 75% fewer API calls
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SA_FILE", "/secrets/google-sa.json")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -59,7 +59,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 # Prevent flicker: number of polls required to flip occupied status
 STABILITY_THRESHOLD = int(os.getenv("STABILITY_THRESHOLD", "2"))
 
-MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))  # seconds
+MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "300"))  # seconds - increased from 30s to 300s (5min) for 10x better cache hit rate
 try:
     MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "6"))
 except Exception:
@@ -74,6 +74,15 @@ APP_INSTANCE_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 # ---------- FLASK / SOCKET.IO ----------
 app = Flask(__name__, static_folder="/frontend")
+
+# Configure Flask-Compress for optimal compression
+app.config['COMPRESS_MIMETYPES'] = [
+    'text/html', 'text/css', 'text/xml', 'text/plain',
+    'application/json', 'application/javascript', 'application/xml'
+]
+app.config['COMPRESS_LEVEL'] = 6  # Balance between speed and compression ratio
+app.config['COMPRESS_MIN_SIZE'] = 500  # Only compress files larger than 500 bytes
+
 # Use eventlet async mode so Socket.IO and gunicorn/eventlet are consistent
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
@@ -85,11 +94,20 @@ if FLASK_COMPRESS_AVAILABLE:
         app.logger.warning("Flask-Compress failed to enable: %s", e)
 
 # ---------- REDIS ----------
+# Use connection pooling for better performance under load
+redis_pool = None
 r = None
 try:
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    redis_pool = redis.ConnectionPool(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=0,
+        max_connections=10,  # Allow up to 10 concurrent connections
+        decode_responses=True
+    )
+    r = redis.Redis(connection_pool=redis_pool)
     r.ping()
-    app.logger.info("Connected to Redis (%s:%s)", REDIS_HOST, REDIS_PORT)
+    app.logger.info("Connected to Redis (%s:%s) with connection pool", REDIS_HOST, REDIS_PORT)
 except Exception as e:
     app.logger.warning("Redis not available: %s", e)
     r = None
@@ -607,27 +625,94 @@ def api_list_with_state():
         })
     return jsonify(output)
 
-# ---------- Static frontend serving (no cache) ----------
+@app.route("/api/rooms/batch-meetings-today")
+def api_batch_meetings_today():
+    """
+    NEW ENDPOINT: Returns all meetings for all rooms in a single request.
+    This eliminates the frontend waterfall of 21+ sequential API calls.
+    Use this instead of calling /api/rooms/<room_id>/meetings-today for each room.
+    """
+    output = {}
+    for room in CALENDARS:
+        rid = room.get("id") or room.get("name")
+        if not rid:
+            continue
+        
+        calendar_id = calendar_id_for_room(rid)
+        if not calendar_id:
+            output[rid] = []
+            continue
+        
+        cache_key = f"room:{rid}:meetings_today"
+        
+        # Try cache first
+        try:
+            if r:
+                cached = r.get(cache_key)
+                if cached:
+                    try:
+                        output[rid] = json.loads(cached)
+                        continue
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        
+        # Fetch from Google Calendar if not cached
+        try:
+            raw_events = fetch_full_day_events(calendar_id)
+            normalized = [normalize_event(ev) for ev in raw_events if normalize_event(ev)]
+            normalized.sort(key=lambda ev: ev.get("start_ts") or 0)
+            
+            # Cache the result
+            try:
+                if r:
+                    r.set(cache_key, json.dumps(normalized), ex=MEETINGS_CACHE_TTL)
+            except Exception:
+                pass
+            
+            output[rid] = normalized
+        except Exception as e:
+            app.logger.warning(f"Failed to fetch meetings for room {rid}: {e}")
+            output[rid] = []
+    
+    return jsonify(output)
+
+
+# ---------- Static frontend serving (optimized caching) ----------
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_frontend(path):
     static_root = app.static_folder or "/frontend"
     fullpath = os.path.join(static_root, path)
+    
+    # Serve static assets (images, CSS, JS) with aggressive caching
     if path and os.path.exists(fullpath):
         resp = send_from_directory(static_root, path)
+        
+        # For static assets (images, fonts, etc.), use long-term caching
+        if path.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svg', '.woff', '.woff2', '.ttf', '.eot')):
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'  # 1 year
+        # For CSS/JS, use shorter cache with revalidation
+        elif path.endswith(('.css', '.js')):
+            resp.headers['Cache-Control'] = 'public, max-age=3600'  # 1 hour
+        # For JSON config files, use no-cache (revalidate every time)
+        elif path.endswith('.json'):
+            resp.headers['Cache-Control'] = 'no-cache'
+        
         return resp
+    
+    # Serve index.html with cache revalidation (not no-store)
     index = os.path.join(static_root, "index.html")
     if os.path.exists(index):
         with open(index, 'rb') as fh:
             data = fh.read()
         resp = make_response(data)
         resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        resp.headers['Pragma'] = 'no-cache'
-        resp.headers['Expires'] = '0'
-        if 'ETag' in resp.headers:
-            del resp.headers['ETag']
+        # Allow caching but require revalidation (supports ETags)
+        resp.headers['Cache-Control'] = 'no-cache'  # Changed from no-store to no-cache
         return resp
+    
     return jsonify({"status": "ok", "message": "frontend missing"})
 
 # ---------- Health / version ----------
