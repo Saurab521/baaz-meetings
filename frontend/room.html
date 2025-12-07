@@ -1,9 +1,18 @@
 <!doctype html>
 <html>
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Turf — Today's Schedule (TV)</title>
+
+  <!-- DNS Prefetch for CDN -->
+  <link rel="dns-prefetch" href="https://cdn.socket.io" />
+
+  <!-- Preload critical assets -->
+  <link rel="preload" href="baaz1.png" as="image" />
+  <link rel="preload" href="wall 4.webp" as="image" />
+
   <style>
     :root {
       --brand-orange: #ffb07a;
@@ -17,13 +26,14 @@
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
 
-    html, body {
+    html,
+    body {
       height: 100%;
       margin: 0;
       color: var(--white);
       overflow: hidden;
-      background: 
-        linear-gradient(rgba(0,0,0,0.55), rgba(0,0,0,0.55)),
+      background:
+        linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)),
         url("wall 4.webp");
       background-size: cover;
       background-position: center;
@@ -62,19 +72,15 @@
       justify-content: center;
       position: relative;
     }
-    
+
     .logo-img {
       width: 100%;
       height: 100%;
       object-fit: contain;
       position: relative;
       z-index: 1;
-      filter: 
-        drop-shadow(0 0 15px rgba(255,255,255,1)) 
-        drop-shadow(0 0 30px rgba(255,255,255,0.8)) 
-        drop-shadow(0 0 45px rgba(255,255,255,0.6))
-        brightness(1.2)
-        contrast(1.1);
+      filter:
+        drop-shadow(0 0 15px rgba(255, 255, 255, 1)) drop-shadow(0 0 30px rgba(255, 255, 255, 0.8)) drop-shadow(0 0 45px rgba(255, 255, 255, 0.6)) brightness(1.2) contrast(1.1);
     }
 
     .brand {
@@ -137,7 +143,7 @@
       padding: 14px;
       border-radius: 12px;
       margin-bottom: 10px;
-      background: rgba(255,255,255,0.01);
+      background: rgba(255, 255, 255, 0.01);
       transition: transform 160ms, background 200ms, color 200ms;
     }
 
@@ -168,9 +174,9 @@
     }
 
     .sched-item.ongoing {
-      background: linear-gradient(90deg, rgba(255,176,122,0.28), rgba(255,176,122,0.12));
-      border: 1px solid rgba(255,140,60,0.18);
-      box-shadow: 0 8px 20px rgba(255,140,60,0.06);
+      background: linear-gradient(90deg, rgba(255, 176, 122, 0.28), rgba(255, 176, 122, 0.12));
+      border: 1px solid rgba(255, 140, 60, 0.18);
+      box-shadow: 0 8px 20px rgba(255, 140, 60, 0.06);
       color: #000;
     }
 
@@ -211,12 +217,14 @@
       .schedule {
         height: calc(100vh - 180px);
       }
+
       .sched-item .time {
         min-width: 110px;
       }
     }
   </style>
 </head>
+
 <body class="hide-cursor">
   <div class="wrap" role="main" aria-live="polite">
     <header>
@@ -251,9 +259,9 @@
     <footer>Meeting display</footer>
   </div>
 
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous" async defer></script>
   <script>
-    (function(){
+    (function () {
       const ERR_EL = document.getElementById('error');
       const BRAND_TURF_ID = document.getElementById('brandTurfId');
       const SCHEDULE_LIST = document.getElementById('scheduleList');
@@ -264,70 +272,70 @@
       let roomId = null;
       let resolvedRoom = null;
       let countdownInterval = null;
-      const AUTO_REFRESH_MS = 30000;
+      const AUTO_REFRESH_MS = 60000; // Reduced from 30s to 60s - WebSocket handles real-time updates
 
-      function showError(msg){
-        if(!msg){ ERR_EL.style.display='none'; ERR_EL.textContent=''; return; }
-        ERR_EL.style.display='block'; ERR_EL.textContent = msg; console.warn(msg);
+      function showError(msg) {
+        if (!msg) { ERR_EL.style.display = 'none'; ERR_EL.textContent = ''; return; }
+        ERR_EL.style.display = 'block'; ERR_EL.textContent = msg; console.warn(msg);
       }
 
-      function escapeHtml(s){
-        if(s===undefined||s===null) return '';
-        return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+      function escapeHtml(s) {
+        if (s === undefined || s === null) return '';
+        return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
       }
 
-      function qParam(name){
+      function qParam(name) {
         const p = new URLSearchParams(window.location.search);
         return p.get(name);
       }
 
-      function extractDateField(v){
-        if(!v) return '';
-        if(typeof v === 'string') return v;
-        if(typeof v === 'object') return v.dateTime || v.date || '';
+      function extractDateField(v) {
+        if (!v) return '';
+        if (typeof v === 'string') return v;
+        if (typeof v === 'object') return v.dateTime || v.date || '';
         return '';
       }
 
-      function dateFromISOorHM(v){
-        if(!v) return null;
+      function dateFromISOorHM(v) {
+        if (!v) return null;
         const isoTry = new Date(v);
-        if(!isNaN(isoTry) && (typeof v === 'string') && (v.includes('T') || v.includes('+') || v.includes('Z'))) return isoTry;
-        const m = (v||'').match(/^(\d{1,2}):(\d{2})$/);
-        if(m){ const d = new Date(); d.setHours(Number(m[1]), Number(m[2]), 0, 0); return d; }
+        if (!isNaN(isoTry) && (typeof v === 'string') && (v.includes('T') || v.includes('+') || v.includes('Z'))) return isoTry;
+        const m = (v || '').match(/^(\d{1,2}):(\d{2})$/);
+        if (m) { const d = new Date(); d.setHours(Number(m[1]), Number(m[2]), 0, 0); return d; }
         return isoTry;
       }
 
-      function formatNice(d){
-        if(!d) return '--:--';
-        try{
+      function formatNice(d) {
+        if (!d) return '--:--';
+        try {
           return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        }catch(e){
+        } catch (e) {
           return '--:--';
         }
       }
 
-      function clearSchedule(){
+      function clearSchedule() {
         SCHEDULE_LIST.innerHTML = '';
         TOTAL_MEET.textContent = '0 meetings';
       }
 
-      function renderSchedule(meetings){
+      function renderSchedule(meetings) {
         SCHEDULE_LIST.innerHTML = '';
-        if(!Array.isArray(meetings) || meetings.length === 0){
+        if (!Array.isArray(meetings) || meetings.length === 0) {
           TOTAL_MEET.textContent = '0 meetings';
           SCHEDULE_LIST.innerHTML = '<div style="color:var(--muted);font-size:var(--small);padding:12px">No meetings today</div>';
           return;
         }
 
-        const norm = meetings.map(m=> {
+        const norm = meetings.map(m => {
           const sraw = extractDateField(m.start);
           const eraw = extractDateField(m.end);
           const sdate = dateFromISOorHM(sraw);
           const edate = dateFromISOorHM(eraw);
-          return Object.assign({}, m, {start_raw:sraw, end_raw:eraw, startDate:sdate, endDate:edate});
-        }).sort((a,b)=> (a.startDate && b.startDate) ? a.startDate - b.startDate : (a.startDate ? -1 : 1));
+          return Object.assign({}, m, { start_raw: sraw, end_raw: eraw, startDate: sdate, endDate: edate });
+        }).sort((a, b) => (a.startDate && b.startDate) ? a.startDate - b.startDate : (a.startDate ? -1 : 1));
 
-        norm.forEach(m=>{
+        norm.forEach(m => {
           const item = document.createElement('div');
           item.className = 'sched-item';
           const who = m.organizer || '—';
@@ -348,13 +356,13 @@
         TOTAL_MEET.textContent = norm.length + ' meetings';
 
         const now = new Date();
-        for(let i=0;i<norm.length;i++){
+        for (let i = 0; i < norm.length; i++) {
           const m = norm[i];
-          if(m.startDate && m.endDate && m.startDate <= now && now < m.endDate){
-            if(m._el){
+          if (m.startDate && m.endDate && m.startDate <= now && now < m.endDate) {
+            if (m._el) {
               m._el.classList.add('ongoing');
               const titleDiv = m._el.querySelector('.title');
-              if(titleDiv && !titleDiv.querySelector('.ongoing-badge')){
+              if (titleDiv && !titleDiv.querySelector('.ongoing-badge')) {
                 const b = document.createElement('span');
                 b.className = 'ongoing-badge';
                 b.textContent = 'ONGOING';
@@ -365,48 +373,48 @@
         }
       }
 
-      async function loadConfig(){
-        try{
-          const r = await fetch('config.json', {cache:'no-store'});
-          if(!r.ok) throw new Error('config.json not found');
+      async function loadConfig() {
+        try {
+          const r = await fetch('config.json', { cache: 'no-cache' }); // Allow caching with revalidation
+          if (!r.ok) throw new Error('config.json not found');
           const cfg = await r.json();
-          if(!cfg.API_URL) throw new Error('API_URL missing in config.json');
-          API_BASE = cfg.API_URL.replace(/\/+$/,'');
-        }catch(e){ throw e; }
+          if (!cfg.API_URL) throw new Error('API_URL missing in config.json');
+          API_BASE = cfg.API_URL.replace(/\/+$/, '');
+        } catch (e) { throw e; }
       }
 
-      async function fetchRoomsList(){
-        try{
-          const res = await fetch(API_BASE + '/rooms', {cache:'no-store'});
-          if(!res.ok) throw new Error('rooms fetch failed: ' + res.status);
+      async function fetchRoomsList() {
+        try {
+          const res = await fetch(API_BASE + '/rooms', { cache: 'no-cache' }); // Allow caching with revalidation
+          if (!res.ok) throw new Error('rooms fetch failed: ' + res.status);
           return await res.json();
-        }catch(e){ console.warn(e); return null; }
+        } catch (e) { console.warn(e); return null; }
       }
 
-      async function fetchMeetingsForRoom(rid){
-        try{
-          const res = await fetch(API_BASE + '/rooms/' + encodeURIComponent(rid) + '/meetings-today', {cache:'no-store'});
-          if(!res.ok) throw new Error('meetings fetch failed: '+res.status);
+      async function fetchMeetingsForRoom(rid) {
+        try {
+          const res = await fetch(API_BASE + '/rooms/' + encodeURIComponent(rid) + '/meetings-today', { cache: 'no-cache' }); // Allow caching with revalidation
+          if (!res.ok) throw new Error('meetings fetch failed: ' + res.status);
           return await res.json();
-        }catch(e){ console.warn(e); return null; }
+        } catch (e) { console.warn(e); return null; }
       }
 
-      async function fetchAndRender(){
+      async function fetchAndRender() {
         showError('');
-        if(!resolvedRoom){ showError('Room not resolved'); return; }
+        if (!resolvedRoom) { showError('Room not resolved'); return; }
         const rid = resolvedRoom.id || resolvedRoom.calendarId || resolvedRoom.name;
-        try{
+        try {
           const meetings = await fetchMeetingsForRoom(rid);
           const meetingsListLocal = Array.isArray(meetings) ? meetings : [];
           renderSchedule(meetingsListLocal);
-        }catch(err){
+        } catch (err) {
           console.warn('fetchAndRender error', err);
           showError('Failed to fetch schedule — check API. Using API base: ' + (API_BASE || 'unknown') + '. See console for details.');
           clearSchedule();
         }
       }
 
-      function computeTurfHeader(resolvedRoom){
+      function computeTurfHeader(resolvedRoom) {
         let rawId = (resolvedRoom.id || resolvedRoom.calendarId || resolvedRoom.name || "").toString().trim();
         let rawName = (resolvedRoom.name || "").toString().trim();
 
@@ -415,51 +423,51 @@
 
         let extractedNumber = "";
         const match = idLower.match(/(\d+)/);
-        if(match) extractedNumber = match[1];
+        if (match) extractedNumber = match[1];
 
-        if(!extractedNumber){
-          let stripped = rawId.replace(/turf/gi,"").replace(/[^0-9a-z]/gi,"").trim();
+        if (!extractedNumber) {
+          let stripped = rawId.replace(/turf/gi, "").replace(/[^0-9a-z]/gi, "").trim();
           const m2 = stripped.match(/(\d+)/);
-          if(m2) extractedNumber = m2[1];
+          if (m2) extractedNumber = m2[1];
           else extractedNumber = stripped || "";
         }
 
-        if(!extractedNumber && rawName){
-          let cleanedName = rawName.replace(/^turf\s*[-\s]*/i,"").trim();
+        if (!extractedNumber && rawName) {
+          let cleanedName = rawName.replace(/^turf\s*[-\s]*/i, "").trim();
           const m3 = cleanedName.match(/(\d+)/);
-          if(m3) extractedNumber = m3[1];
+          if (m3) extractedNumber = m3[1];
           else extractedNumber = cleanedName || "";
         }
 
-        if(!extractedNumber) extractedNumber = rawId || rawName || "—";
+        if (!extractedNumber) extractedNumber = rawId || rawName || "—";
 
         return `Turf - ${extractedNumber}`;
       }
 
-      async function init(){
-        try{ await loadConfig(); } catch(e){ showError('Config error: '+e.message); return; }
+      async function init() {
+        try { await loadConfig(); } catch (e) { showError('Config error: ' + e.message); return; }
         roomId = qParam('id') || qParam('room') || null;
 
-        try{
+        try {
           const rooms = await fetchRoomsList();
-          if(!rooms || rooms.length === 0){
+          if (!rooms || rooms.length === 0) {
             showError('No rooms returned from API');
             BRAND_TURF_ID.textContent = '—';
             clearSchedule();
             return;
           }
 
-          if(roomId){
+          if (roomId) {
             const match = rooms.find(r => String(r.id) === String(roomId) || String(r.name) === String(roomId) || String(r.calendarId) === String(roomId));
             resolvedRoom = match || rooms[0];
-            if(!match) showError('Requested room not found, showing top room instead.');
+            if (!match) showError('Requested room not found, showing top room instead.');
           } else {
             resolvedRoom = rooms[0];
           }
 
           BRAND_TURF_ID.textContent = computeTurfHeader(resolvedRoom);
 
-        }catch(e){
+        } catch (e) {
           showError('Failed to fetch rooms list: ' + (e.message || e));
           return;
         }
@@ -467,38 +475,39 @@
         await fetchAndRender();
         setInterval(fetchAndRender, AUTO_REFRESH_MS);
 
-        try{
+        try {
           const parsed = new URL(API_BASE, window.location.origin);
-          const socket = io(parsed.origin + '/rooms', { transports:['websocket','polling'] });
-          socket.on('connect', ()=> console.log('socket connected'));
+          const socket = io(parsed.origin + '/rooms', { transports: ['websocket', 'polling'] });
+          socket.on('connect', () => console.log('socket connected'));
           socket.on('room_state', payload => {
-            if(!payload) return;
+            if (!payload) return;
             const rid = resolvedRoom.id || resolvedRoom.name || resolvedRoom.calendarId;
-            if(payload.room_id && String(payload.room_id) === String(rid)){
+            if (payload.room_id && String(payload.room_id) === String(rid)) {
               fetchAndRender();
             }
           });
-          socket.on('disconnect', ()=> console.warn('socket disconnected'));
-        }catch(e){ console.warn('socket init failed', e); }
+          socket.on('disconnect', () => console.warn('socket disconnected'));
+        } catch (e) { console.warn('socket init failed', e); }
       }
 
-      function updateClock(){
+      function updateClock() {
         CLOCK.textContent = new Date().toLocaleString();
       }
       setInterval(updateClock, 1000);
       updateClock();
 
       let cursorTimer = null;
-      function resetCursorTimer(){
+      function resetCursorTimer() {
         document.body.classList.remove('hide-cursor');
-        if(cursorTimer) clearTimeout(cursorTimer);
-        cursorTimer = setTimeout(()=>document.body.classList.add('hide-cursor'), 3000);
+        if (cursorTimer) clearTimeout(cursorTimer);
+        cursorTimer = setTimeout(() => document.body.classList.add('hide-cursor'), 3000);
       }
-      ['mousemove','keydown','touchstart'].forEach(ev => window.addEventListener(ev, resetCursorTimer));
+      ['mousemove', 'keydown', 'touchstart'].forEach(ev => window.addEventListener(ev, resetCursorTimer));
       resetCursorTimer();
 
       init();
     })();
   </script>
 </body>
+
 </html>

@@ -1,240 +1,359 @@
 <!doctype html>
 <html>
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Baaz Bike — Meeting Rooms</title>
+
+  <!-- DNS Prefetch for CDN -->
+  <link rel="dns-prefetch" href="https://cdn.socket.io" />
+
+  <!-- Preload critical assets -->
+  <link rel="preload" href="baaz1.png" as="image" />
   <style>
-    :root{
-      --brand-orange:#ff6a00;
-      --muted:#6b7280;
-      --card-bg:#fff;
-      --ok-green:#065f46;
-      --danger:#7a1b1b;
+    :root {
+      --brand-orange: #ff6a00;
+      --muted: #6b7280;
+      --card-bg: #fff;
+      --ok-green: #065f46;
+      --danger: #7a1b1b;
       font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
     }
 
-    body{
-      margin:0;
-      padding:18px;
-      background:linear-gradient(180deg,#fff,#fbfbfb);
-      color:#0b0b0b;
-      -webkit-font-smoothing:antialiased;
+    body {
+      margin: 0;
+      padding: 18px;
+      background: linear-gradient(180deg, #fff, #fbfbfb);
+      color: #0b0b0b;
+      -webkit-font-smoothing: antialiased;
     }
 
-    header{
-      display:flex;
-      align-items:center;
-      gap:12px;
-      margin-bottom:14px;
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
     }
 
-    .brand{ display:flex; gap:12px; align-items:center; }
-    .logo{ width:75px; height:75px; display:flex; align-items:center; justify-content:center; padding:0; }
-    .logo-img{ width:100%; height:100%; object-fit:contain; }
-
-    .brand h1{ margin:0; font-size:18px; font-weight:700; }
-    .brand p{ margin:0; font-size:12px; color:var(--muted); font-weight:600; }
-
-    #controls{ margin-left:auto; display:flex; gap:10px; align-items:center; }
-    .btn{
-      background:var(--brand-orange);
-      color:#fff;
-      border:none;
-      padding:8px 12px;
-      border-radius:10px;
-      cursor:pointer;
-      font-weight:600;
-      box-shadow:0 8px 18px rgba(255,106,0,0.12);
-      transition:transform 0.2s;
-    }
-    .btn:hover{ transform:translateY(-2px); }
-
-    #clock{ color:var(--muted); font-size:13px; margin-left:8px; }
-
-    .error{
-      background:#fff4f6;
-      color:#9b1c1c;
-      padding:10px;
-      border-radius:8px;
-      display:none;
-      margin-bottom:12px;
-      border:1px solid rgba(155,28,28,0.08);
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
     }
 
-    .grid{
-      display:grid;
-      grid-template-columns:repeat(auto-fill, minmax(240px,1fr));
-      gap:12px;
-      margin-top:12px;
+    .logo {
+      width: 75px;
+      height: 75px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .logo-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .brand p {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    #controls {
+      margin-left: auto;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .btn {
+      background: var(--brand-orange);
+      color: #fff;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+      box-shadow: 0 8px 18px rgba(255, 106, 0, 0.12);
+      transition: transform 0.2s;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+    }
+
+    #clock {
+      color: var(--muted);
+      font-size: 13px;
+      margin-left: 8px;
+    }
+
+    .error {
+      background: #fff4f6;
+      color: #9b1c1c;
+      padding: 10px;
+      border-radius: 8px;
+      display: none;
+      margin-bottom: 12px;
+      border: 1px solid rgba(155, 28, 28, 0.08);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
     }
 
     /* ========== SKELETON LOADER STYLES ========== */
-    .skeleton-room{
-      background:var(--card-bg);
-      border-radius:12px;
-      padding:14px;
-      box-shadow:0 8px 24px rgba(11,11,11,0.06);
-      border:1px solid rgba(11,11,11,0.05);
-      min-height:120px;
-      position:relative;
-      overflow:hidden;
+    .skeleton-room {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(11, 11, 11, 0.06);
+      border: 1px solid rgba(11, 11, 11, 0.05);
+      min-height: 120px;
+      position: relative;
+      overflow: hidden;
     }
 
-    .skeleton-room::before{
-      content:'';
-      position:absolute;
-      top:0;
-      left:-100%;
-      width:100%;
-      height:100%;
-      background:linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent);
-      animation:shimmer 1.5s infinite;
+    .skeleton-room::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
+      animation: shimmer 1.5s infinite;
     }
 
-    @keyframes shimmer{
-      0%{ left:-100%; }
-      100%{ left:100%; }
+    @keyframes shimmer {
+      0% {
+        left: -100%;
+      }
+
+      100% {
+        left: 100%;
+      }
     }
 
-    .skeleton-line{
-      height:14px;
-      background:linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-      background-size:200% 100%;
-      border-radius:4px;
-      margin-bottom:8px;
+    .skeleton-line {
+      height: 14px;
+      background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+      background-size: 200% 100%;
+      border-radius: 4px;
+      margin-bottom: 8px;
     }
 
-    .skeleton-line.title{ width:70%; height:16px; }
-    .skeleton-line.status{ width:50px; height:24px; border-radius:12px; margin-top:8px; }
-    .skeleton-line.meeting{ width:85%; height:12px; margin-top:10px; }
-    .skeleton-line.button{ width:120px; height:32px; border-radius:8px; margin-top:12px; }
+    .skeleton-line.title {
+      width: 70%;
+      height: 16px;
+    }
+
+    .skeleton-line.status {
+      width: 50px;
+      height: 24px;
+      border-radius: 12px;
+      margin-top: 8px;
+    }
+
+    .skeleton-line.meeting {
+      width: 85%;
+      height: 12px;
+      margin-top: 10px;
+    }
+
+    .skeleton-line.button {
+      width: 120px;
+      height: 32px;
+      border-radius: 8px;
+      margin-top: 12px;
+    }
+
     /* ========================================== */
 
-    .room{
-      background:var(--card-bg);
-      border-radius:12px;
-      padding:14px;
-      box-shadow:0 8px 24px rgba(11,11,11,0.06);
-      border:1px solid rgba(11,11,11,0.05);
-      transition:0.18s;
-      position:relative;
-      min-height:120px;
+    .room {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(11, 11, 11, 0.06);
+      border: 1px solid rgba(11, 11, 11, 0.05);
+      transition: 0.18s;
+      position: relative;
+      min-height: 120px;
     }
 
-    .room:hover{ transform:translateY(-6px); box-shadow:0 16px 38px rgba(11,11,11,0.07); }
-
-    .room.ongoing{
-      border-color:rgba(122,27,27,0.20);
-      box-shadow:0 14px 34px rgba(122,27,27,0.10);
+    .room:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 16px 38px rgba(11, 11, 11, 0.07);
     }
 
-    .title{
-      font-weight:700;
-      font-size:15px;
-      margin-bottom:6px;
-      display:flex;
-      align-items:center;
-      gap:8px;
+    .room.ongoing {
+      border-color: rgba(122, 27, 27, 0.20);
+      box-shadow: 0 14px 34px rgba(122, 27, 27, 0.10);
     }
 
-    .status{
-      padding:6px 10px;
-      border-radius:999px;
-      font-weight:700;
-      font-size:13px;
-      display:inline-block;
+    .title {
+      font-weight: 700;
+      font-size: 15px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    .free{ background:#f0fff4; color:var(--ok-green); }
-    .busy{ background:#fff7f0; color:var(--danger); }
-
-    .short-summary{ margin-top:10px; font-size:13px; color:#333; min-height:36px; }
-
-    .meeting-line{
-      font-size:13px;
-      color:#444;
-      margin-top:6px;
-      display:flex;
-      justify-content:space-between;
-      gap:8px;
+    .status {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 13px;
+      display: inline-block;
     }
 
-    .meeting-title{
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
-      max-width:160px;
+    .free {
+      background: #f0fff4;
+      color: var(--ok-green);
     }
 
-    .meeting-time{ color:var(--muted); min-width:78px; text-align:right; font-size:12px; }
-
-    .listBtn{
-      margin-top:10px;
-      display:inline-block;
-      background:transparent;
-      color:var(--brand-orange);
-      padding:6px 8px;
-      border-radius:8px;
-      text-decoration:none;
-      font-weight:700;
-      border:1px solid rgba(255,106,0,0.12);
-      cursor:pointer;
-      transition:0.2s;
-    }
-    .listBtn:hover{ background:rgba(255,106,0,0.05); }
-
-    .details{ margin-top:10px; display:none; font-size:14px; color:#222; }
-    .details[aria-hidden="false"]{ display:block; }
-
-    .meeting{
-      padding:8px;
-      margin-bottom:8px;
-      border-radius:8px;
-      background:#fafafa;
-      box-shadow:0 2px 6px rgba(0,0,0,0.03);
+    .busy {
+      background: #fff7f0;
+      color: var(--danger);
     }
 
-    .badge{
-      background:var(--danger);
-      color:#fff;
-      padding:4px 8px;
-      border-radius:999px;
-      font-size:12px;
-      font-weight:700;
-      margin-left:6px;
-      animation:pulse 2s ease-in-out infinite;
+    .short-summary {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #333;
+      min-height: 36px;
     }
 
-    @keyframes pulse{
-      0%, 100%{ opacity:1; }
-      50%{ opacity:0.7; }
+    .meeting-line {
+      font-size: 13px;
+      color: #444;
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
     }
 
-    .meta-row{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      margin-top:8px;
-      color:var(--muted);
-      font-size:12px;
+    .meeting-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 160px;
     }
 
-    footer{
-      margin-top:18px;
-      font-size:13px;
-      color:var(--muted);
-      text-align:center;
+    .meeting-time {
+      color: var(--muted);
+      min-width: 78px;
+      text-align: right;
+      font-size: 12px;
     }
 
-    @media (max-width:520px){
-      body{ padding:12px; }
-      .grid{ grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); }
-      .meeting-title{ max-width:120px; }
+    .listBtn {
+      margin-top: 10px;
+      display: inline-block;
+      background: transparent;
+      color: var(--brand-orange);
+      padding: 6px 8px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 700;
+      border: 1px solid rgba(255, 106, 0, 0.12);
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .listBtn:hover {
+      background: rgba(255, 106, 0, 0.05);
+    }
+
+    .details {
+      margin-top: 10px;
+      display: none;
+      font-size: 14px;
+      color: #222;
+    }
+
+    .details[aria-hidden="false"] {
+      display: block;
+    }
+
+    .meeting {
+      padding: 8px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      background: #fafafa;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
+    }
+
+    .badge {
+      background: var(--danger);
+      color: #fff;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-left: 6px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.7;
+      }
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    footer {
+      margin-top: 18px;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    @media (max-width:520px) {
+      body {
+        padding: 12px;
+      }
+
+      .grid {
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      }
+
+      .meeting-title {
+        max-width: 120px;
+      }
     }
   </style>
 
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous" async defer></script>
 </head>
 
 <body>
@@ -267,175 +386,174 @@
   <footer>© 2025 Baaz Bike. All rights reserved.</footer>
 
   <script>
-  (function(){
+    (function () {
 
-    let API_BASE = '/api';
-    let currentData = [];
-    const AUTO_REFRESH_SECONDS_DEFAULT = 10;
-    const POLL_FAST_MS = 3000;
-    const POLL_SLOW_MS = 30000;
-    const POLL_FAST_ROUNDS = 4;
+      let API_BASE = '/api';
+      let currentData = [];
+      const AUTO_REFRESH_SECONDS_DEFAULT = 10;
+      const POLL_FAST_MS = 3000;
+      const POLL_SLOW_MS = 30000;
+      const POLL_FAST_ROUNDS = 4;
 
-    // ========== SKELETON LOADER FUNCTION ==========
-    function showSkeletonLoaders(count = 21){
-      const container = document.getElementById("rooms");
-      container.innerHTML = "";
-      
-      for(let i = 0; i < count; i++){
-        const skeleton = document.createElement("div");
-        skeleton.className = "skeleton-room";
-        skeleton.innerHTML = `
+      // ========== SKELETON LOADER FUNCTION ==========
+      function showSkeletonLoaders(count = 21) {
+        const container = document.getElementById("rooms");
+        container.innerHTML = "";
+
+        for (let i = 0; i < count; i++) {
+          const skeleton = document.createElement("div");
+          skeleton.className = "skeleton-room";
+          skeleton.innerHTML = `
           <div class="skeleton-line title"></div>
           <div class="skeleton-line status"></div>
           <div class="skeleton-line meeting"></div>
           <div class="skeleton-line meeting" style="width:75%;"></div>
           <div class="skeleton-line button"></div>
         `;
-        container.appendChild(skeleton);
+          container.appendChild(skeleton);
+        }
       }
-    }
-    // ============================================
+      // ============================================
 
-    function sanitizeId(v){ return String(v||'').replace(/[^a-z0-9\-]/gi,'-'); }
-    function escapeHtml(s){ if(s===undefined||s===null) return ''; return String(s).replace(/[&"'<>]/g, c=>({ '&':'&amp;','"':'&quot;',"'":"&#39;",'<':'&lt;', '>':'&gt;' }[c])); }
-    function formatTurfName(n){
-      if(!n) return '';
-      n = String(n).trim().replace(/[-_]+/g,' ').replace(/\s+/g,' ');
-      return n.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-    }
-
-    function toNumberTs(ev, preferStart){
-      if(!ev) return null;
-      if(preferStart){
-        if(ev.start_ts || ev.start_ts === 0) return Number(ev.start_ts);
-        if(ev.start){ const d = new Date(ev.start); if(!isNaN(d)) return d.getTime(); }
-      } else {
-        if(ev.end_ts || ev.end_ts === 0) return Number(ev.end_ts);
-        if(ev.end){ const d = new Date(ev.end); if(!isNaN(d)) return d.getTime(); }
-      }
-      return null;
-    }
-
-    function fmtTimeTs(v){
-      if(!v) return '';
-      try{ const d = new Date(Number(v)); if(isNaN(d)) return ''; return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }catch(e){ return ''; }
-    }
-
-    function extractOrganizer(o){
-      if(!o) return '';
-      if(typeof o === 'string') return o;
-      if(typeof o === 'object') return o.email || o.displayName || '';
-      return '';
-    }
-
-    function showError(msg){
-      const el = document.getElementById('error');
-      if(!msg){ el.style.display='none'; el.textContent=''; return; }
-      el.style.display='block';
-      el.textContent = msg;
-    }
-
-    function isSameDayTs(ts){
-      if(!ts) return false;
-      const d = new Date(Number(ts));
-      const now = new Date();
-      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-    }
-
-    function isTodayEvent(ev){
-      const s = toNumberTs(ev, true) || (ev.start ? new Date(ev.start).getTime() : null);
-      return s && isSameDayTs(s);
-    }
-
-    function isOngoingEvent(ev){
-      const s = toNumberTs(ev, true) || (ev.start ? new Date(ev.start).getTime() : null);
-      const e = toNumberTs(ev, false) || (ev.end ? new Date(ev.end).getTime() : null);
-      if(!s || !e) return false;
-      const now = Date.now();
-      return s <= now && now < e;
-    }
-
-    function renderRooms(data){
-      const container = document.getElementById("rooms");
-      container.innerHTML = "";
-
-      if(!data || data.length === 0){
-        container.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted);">No rooms configured</div>';
-        return;
+      function sanitizeId(v) { return String(v || '').replace(/[^a-z0-9\-]/gi, '-'); }
+      function escapeHtml(s) { if (s === undefined || s === null) return ''; return String(s).replace(/[&"'<>]/g, c => ({ '&': '&amp;', '"': '&quot;', "'": "&#39;", '<': '&lt;', '>': '&gt;' }[c])); }
+      function formatTurfName(n) {
+        if (!n) return '';
+        n = String(n).trim().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
+        return n.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
       }
 
-      const now = Date.now();
-
-      data.forEach(room=>{
-        const idSafe = room.id || room.name || room.calendarId || "";
-        const safeId = sanitizeId(idSafe);
-
-        const state = room.state || {};
-        const meetingsAll = Array.isArray(state.all) ? state.all : [];
-
-        const meetingsToday = meetingsAll.filter(isTodayEvent).map(m=>{
-          const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
-          const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
-          return Object.assign({}, m, { _start_ts: s, _end_ts: e });
-        }).sort((a,b) => (a._start_ts||0) - (b._start_ts||0));
-
-        let topMeetings = [];
-        const ongoing = meetingsToday.find(isOngoingEvent);
-        if(ongoing){
-          const remaining = meetingsToday.filter(m => m !== ongoing);
-          const next = remaining.find(m => (m._start_ts||0) >= now) || remaining[0] || null;
-          topMeetings.push(ongoing);
-          if(next) topMeetings.push(next);
+      function toNumberTs(ev, preferStart) {
+        if (!ev) return null;
+        if (preferStart) {
+          if (ev.start_ts || ev.start_ts === 0) return Number(ev.start_ts);
+          if (ev.start) { const d = new Date(ev.start); if (!isNaN(d)) return d.getTime(); }
         } else {
-          const upcoming = meetingsToday.filter(m => (m._start_ts||0) >= now);
-          if(upcoming.length >= 2) topMeetings = upcoming.slice(0,2);
-          else if(upcoming.length === 1){
-            topMeetings = [upcoming[0]];
-            const past = meetingsToday.filter(m => (m._start_ts||0) < now);
-            if(past.length) topMeetings.push(past[past.length-1]);
-          } else {
-            const past = meetingsToday.filter(m => (m._start_ts||0) < now);
-            topMeetings = past.slice(-2);
-          }
+          if (ev.end_ts || ev.end_ts === 0) return Number(ev.end_ts);
+          if (ev.end) { const d = new Date(ev.end); if (!isNaN(d)) return d.getTime(); }
+        }
+        return null;
+      }
+
+      function fmtTimeTs(v) {
+        if (!v) return '';
+        try { const d = new Date(Number(v)); if (isNaN(d)) return ''; return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; }
+      }
+
+      function extractOrganizer(o) {
+        if (!o) return '';
+        if (typeof o === 'string') return o;
+        if (typeof o === 'object') return o.email || o.displayName || '';
+        return '';
+      }
+
+      function showError(msg) {
+        const el = document.getElementById('error');
+        if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+        el.style.display = 'block';
+        el.textContent = msg;
+      }
+
+      function isSameDayTs(ts) {
+        if (!ts) return false;
+        const d = new Date(Number(ts));
+        const now = new Date();
+        return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+      }
+
+      function isTodayEvent(ev) {
+        const s = toNumberTs(ev, true) || (ev.start ? new Date(ev.start).getTime() : null);
+        return s && isSameDayTs(s);
+      }
+
+      function isOngoingEvent(ev) {
+        const s = toNumberTs(ev, true) || (ev.start ? new Date(ev.start).getTime() : null);
+        const e = toNumberTs(ev, false) || (ev.end ? new Date(ev.end).getTime() : null);
+        if (!s || !e) return false;
+        const now = Date.now();
+        return s <= now && now < e;
+      }
+
+      function renderRooms(data) {
+        const container = document.getElementById("rooms");
+        container.innerHTML = "";
+
+        if (!data || data.length === 0) {
+          container.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted);">No rooms configured</div>';
+          return;
         }
 
-        const occupied = !!(state.is_ongoing || state.occupied || ongoing || (state.current && Object.keys(state.current||{}).length));
-        const totalCount = meetingsToday.length || 0;
+        const now = Date.now();
 
-        const div = document.createElement("div");
-        div.className = "room" + (occupied ? " ongoing" : "");
-        div.innerHTML = `
+        data.forEach(room => {
+          const idSafe = room.id || room.name || room.calendarId || "";
+          const safeId = sanitizeId(idSafe);
+
+          const state = room.state || {};
+          const meetingsAll = Array.isArray(state.all) ? state.all : [];
+
+          const meetingsToday = meetingsAll.filter(isTodayEvent).map(m => {
+            const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
+            const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
+            return Object.assign({}, m, { _start_ts: s, _end_ts: e });
+          }).sort((a, b) => (a._start_ts || 0) - (b._start_ts || 0));
+
+          let topMeetings = [];
+          const ongoing = meetingsToday.find(isOngoingEvent);
+          if (ongoing) {
+            const remaining = meetingsToday.filter(m => m !== ongoing);
+            const next = remaining.find(m => (m._start_ts || 0) >= now) || remaining[0] || null;
+            topMeetings.push(ongoing);
+            if (next) topMeetings.push(next);
+          } else {
+            const upcoming = meetingsToday.filter(m => (m._start_ts || 0) >= now);
+            if (upcoming.length >= 2) topMeetings = upcoming.slice(0, 2);
+            else if (upcoming.length === 1) {
+              topMeetings = [upcoming[0]];
+              const past = meetingsToday.filter(m => (m._start_ts || 0) < now);
+              if (past.length) topMeetings.push(past[past.length - 1]);
+            } else {
+              const past = meetingsToday.filter(m => (m._start_ts || 0) < now);
+              topMeetings = past.slice(-2);
+            }
+          }
+
+          const occupied = !!(state.is_ongoing || state.occupied || ongoing || (state.current && Object.keys(state.current || {}).length));
+          const totalCount = meetingsToday.length || 0;
+
+          const div = document.createElement("div");
+          div.className = "room" + (occupied ? " ongoing" : "");
+          div.innerHTML = `
           <div class="title">
             ${escapeHtml(formatTurfName(room.name || room.displayName || idSafe))}
             ${occupied ? '<span class="badge">Ongoing</span>' : ''}
           </div>
 
           <div>
-            <span class="status ${occupied ? 'busy':'free'}">
-              ${occupied ? 'Busy':'Free'}
+            <span class="status ${occupied ? 'busy' : 'free'}">
+              ${occupied ? 'Busy' : 'Free'}
             </span>
           </div>
 
           <div class="short-summary">
-            ${
-              (topMeetings && topMeetings.length)
-                ? topMeetings.map(m=>{
-                    const s = m._start_ts || m.start || null;
-                    const e = m._end_ts || m.end || null;
-                    const ongoingMark = isOngoingEvent(m) ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' : '';
-                    return `
+            ${(topMeetings && topMeetings.length)
+              ? topMeetings.map(m => {
+                const s = m._start_ts || m.start || null;
+                const e = m._end_ts || m.end || null;
+                const ongoingMark = isOngoingEvent(m) ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' : '';
+                return `
                       <div class="meeting-line">
                         <span class="meeting-title">${escapeHtml(m.title || 'Meeting')}${ongoingMark}</span>
                         <span class="meeting-time">${fmtTimeTs(s)} - ${fmtTimeTs(e)}</span>
                       </div>
                     `;
-                  }).join('')
-                : '<em style="color:var(--muted)">No meetings today</em>'
+              }).join('')
+              : '<em style="color:var(--muted)">No meetings today</em>'
             }
           </div>
 
           <button class="listBtn" data-id="${escapeHtml(idSafe)}" data-safeid="${safeId}">
-            Show meetings ${ totalCount ? '(' + totalCount + ')' : '' }
+            Show meetings ${totalCount ? '(' + totalCount + ')' : ''}
           </button>
 
           <div class="details" id="details-${safeId}" aria-hidden="true"></div>
@@ -444,134 +562,134 @@
             <div>Organizer: <strong>${escapeHtml((meetingsToday.find(isOngoingEvent) || meetingsToday[0] || {}).organizer || '')}</strong></div>
           </div>
         `;
-        container.appendChild(div);
-      });
-    }
-
-    async function fetchRoomsWithState(){
-      const r = await fetch(`${API_BASE}/rooms/list-with-state`, { cache: "no-store" });
-      if(!r.ok) throw new Error('Failed to fetch rooms list-with-state: ' + r.status);
-      return await r.json();
-    }
-
-    async function fetchMeetingsTodayForRoom(rid){
-      try{
-        const url = `${API_BASE.replace(/\/$/,'')}/rooms/${encodeURIComponent(rid)}/meetings-today`;
-        const resp = await fetch(url, { cache: "no-store" });
-        if(!resp.ok) return null;
-        const data = await resp.json();
-        return Array.isArray(data) ? data : null;
-      }catch(e){
-        console.warn('per-room fetch failed for', rid, e);
-        return null;
+          container.appendChild(div);
+        });
       }
-    }
 
-    const pollers = {};
-    function stopPoller(rid){
-      if(!pollers[rid]) return;
-      clearInterval(pollers[rid].timer);
-      delete pollers[rid];
-    }
-    function startPollerForRoom(rid){
-      if(!rid) return;
-      if(pollers[rid]) return;
-      pollers[rid] = { attempts: 0, timer: null };
+      async function fetchRoomsWithState() {
+        const r = await fetch(`${API_BASE}/rooms/list-with-state`, { cache: "no-cache" }); // Allow caching with revalidation
+        if (!r.ok) throw new Error('Failed to fetch rooms list-with-state: ' + r.status);
+        return await r.json();
+      }
 
-      async function attempt(){
-        pollers[rid].attempts++;
-        const data = await fetchMeetingsTodayForRoom(rid);
-        if(Array.isArray(data) && data.filter(isTodayEvent).length > 0){
-          let idx = (currentData||[]).findIndex(r => String(r.id) === String(rid) || String(r.calendarId) === String(rid) || String(r.name) === String(rid));
-          if(idx < 0){
-            currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: data, last_success: new Date().toISOString() } });
-          } else {
-            currentData[idx].state = currentData[idx].state || {};
-            currentData[idx].state.all = data;
-            currentData[idx].state.last_success = new Date().toISOString();
-          }
-          renderRooms(currentData);
-          stopPoller(rid);
-          return true;
+      async function fetchMeetingsTodayForRoom(rid) {
+        try {
+          const url = `${API_BASE.replace(/\/$/, '')}/rooms/${encodeURIComponent(rid)}/meetings-today`;
+          const resp = await fetch(url, { cache: "no-cache" }); // Allow caching with revalidation
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          return Array.isArray(data) ? data : null;
+        } catch (e) {
+          console.warn('per-room fetch failed for', rid, e);
+          return null;
         }
-        return false;
       }
 
-      attempt();
+      const pollers = {};
+      function stopPoller(rid) {
+        if (!pollers[rid]) return;
+        clearInterval(pollers[rid].timer);
+        delete pollers[rid];
+      }
+      function startPollerForRoom(rid) {
+        if (!rid) return;
+        if (pollers[rid]) return;
+        pollers[rid] = { attempts: 0, timer: null };
 
-      pollers[rid].timer = setInterval(async ()=>{
-        if(pollers[rid].attempts >= POLL_FAST_ROUNDS){
-          clearInterval(pollers[rid].timer);
-          pollers[rid].timer = setInterval(async ()=>{
+        async function attempt() {
+          pollers[rid].attempts++;
+          const data = await fetchMeetingsTodayForRoom(rid);
+          if (Array.isArray(data) && data.filter(isTodayEvent).length > 0) {
+            let idx = (currentData || []).findIndex(r => String(r.id) === String(rid) || String(r.calendarId) === String(rid) || String(r.name) === String(rid));
+            if (idx < 0) {
+              currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: data, last_success: new Date().toISOString() } });
+            } else {
+              currentData[idx].state = currentData[idx].state || {};
+              currentData[idx].state.all = data;
+              currentData[idx].state.last_success = new Date().toISOString();
+            }
+            renderRooms(currentData);
+            stopPoller(rid);
+            return true;
+          }
+          return false;
+        }
+
+        attempt();
+
+        pollers[rid].timer = setInterval(async () => {
+          if (pollers[rid].attempts >= POLL_FAST_ROUNDS) {
+            clearInterval(pollers[rid].timer);
+            pollers[rid].timer = setInterval(async () => {
+              pollers[rid].attempts++;
+              const ok = await attempt();
+              if (ok || pollers[rid].attempts > 40) stopPoller(rid);
+            }, POLL_SLOW_MS);
+          } else {
             pollers[rid].attempts++;
             const ok = await attempt();
-            if(ok || pollers[rid].attempts > 40) stopPoller(rid);
-          }, POLL_SLOW_MS);
-        } else {
-          pollers[rid].attempts++;
-          const ok = await attempt();
-          if(ok) stopPoller(rid);
-        }
-      }, POLL_FAST_MS);
-    }
-
-    async function loadData(){
-      try{
-        const rooms = await fetchRoomsWithState();
-        const enriched = rooms.map(room => ({ id: room.id, name: room.name, calendarId: room.calendarId, state: room.state || {} }));
-
-        const base = (typeof API_BASE === 'string' && API_BASE.trim()) ? API_BASE.replace(/\/$/,'') : '/api';
-        const missing = enriched.filter(r => !(r.state && Array.isArray(r.state.all) && r.state.all.length > 0));
-        if(missing.length){
-          await Promise.all(missing.map(async r=>{
-            try{
-              const data = await fetchMeetingsTodayForRoom(r.id);
-              if(Array.isArray(data) && data.filter(isTodayEvent).length > 0){
-                r.state = r.state || {};
-                r.state.all = data;
-                r.state.last_success = new Date().toISOString();
-              }
-            }catch(e){ /* ignore */ }
-          }));
-        }
-
-        currentData = enriched;
-        renderRooms(currentData);
-
-        enriched.forEach(r=>{
-          const has = r.state && Array.isArray(r.state.all) && r.state.all.length > 0 && r.state.all.some(isTodayEvent);
-          if(!has) startPollerForRoom(r.id);
-          else stopPoller(r.id);
-        });
-
-      }catch(e){
-        showError("Failed to load data");
-        console.error(e);
+            if (ok) stopPoller(rid);
+          }
+        }, POLL_FAST_MS);
       }
-    }
 
-    document.addEventListener("click", async e=>{
-      if(e.target.classList.contains("listBtn")){
-        const id = e.target.dataset.id;
-        const safeId = e.target.dataset.safeid || sanitizeId(id);
-        const div = document.getElementById(`details-${safeId}`);
-        const open = div.getAttribute("aria-hidden") === "false";
-        if(open){
-          div.setAttribute("aria-hidden","true");
-          div.innerHTML = "";
-        } else {
-          const room = currentData.find(r=>String(r.calendarId)==String(id) || String(r.id)===String(id) || String(r.name)===String(id));
-          let meetings = room && room.state && Array.isArray(room.state.all) ? room.state.all.filter(isTodayEvent) : [];
-          meetings = (meetings || []).map(m=>{
-            const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
-            const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
-            return Object.assign({}, m, { _start_ts: s, _end_ts: e });
-          }).sort((a,b)=>(a._start_ts||0) - (b._start_ts||0));
+      async function loadData() {
+        try {
+          const rooms = await fetchRoomsWithState();
+          const enriched = rooms.map(room => ({ id: room.id, name: room.name, calendarId: room.calendarId, state: room.state || {} }));
 
-          if(meetings.length){
-            div.innerHTML = meetings.map(m=>{
-              const ongoingMark = isOngoingEvent(m) ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' : '';
-              return `
+          const base = (typeof API_BASE === 'string' && API_BASE.trim()) ? API_BASE.replace(/\/$/, '') : '/api';
+          const missing = enriched.filter(r => !(r.state && Array.isArray(r.state.all) && r.state.all.length > 0));
+          if (missing.length) {
+            await Promise.all(missing.map(async r => {
+              try {
+                const data = await fetchMeetingsTodayForRoom(r.id);
+                if (Array.isArray(data) && data.filter(isTodayEvent).length > 0) {
+                  r.state = r.state || {};
+                  r.state.all = data;
+                  r.state.last_success = new Date().toISOString();
+                }
+              } catch (e) { /* ignore */ }
+            }));
+          }
+
+          currentData = enriched;
+          renderRooms(currentData);
+
+          enriched.forEach(r => {
+            const has = r.state && Array.isArray(r.state.all) && r.state.all.length > 0 && r.state.all.some(isTodayEvent);
+            if (!has) startPollerForRoom(r.id);
+            else stopPoller(r.id);
+          });
+
+        } catch (e) {
+          showError("Failed to load data");
+          console.error(e);
+        }
+      }
+
+      document.addEventListener("click", async e => {
+        if (e.target.classList.contains("listBtn")) {
+          const id = e.target.dataset.id;
+          const safeId = e.target.dataset.safeid || sanitizeId(id);
+          const div = document.getElementById(`details-${safeId}`);
+          const open = div.getAttribute("aria-hidden") === "false";
+          if (open) {
+            div.setAttribute("aria-hidden", "true");
+            div.innerHTML = "";
+          } else {
+            const room = currentData.find(r => String(r.calendarId) == String(id) || String(r.id) === String(id) || String(r.name) === String(id));
+            let meetings = room && room.state && Array.isArray(room.state.all) ? room.state.all.filter(isTodayEvent) : [];
+            meetings = (meetings || []).map(m => {
+              const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
+              const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
+              return Object.assign({}, m, { _start_ts: s, _end_ts: e });
+            }).sort((a, b) => (a._start_ts || 0) - (b._start_ts || 0));
+
+            if (meetings.length) {
+              div.innerHTML = meetings.map(m => {
+                const ongoingMark = isOngoingEvent(m) ? ' <strong style="color:var(--danger);margin-left:6px">ONGOING</strong>' : '';
+                return `
                 <div class="meeting">
                   <strong>${escapeHtml(m.title)}</strong>
                   <div style="font-size:13px;color:#444">
@@ -579,104 +697,105 @@
                   </div>
                 </div>
               `;
-            }).join('');
-          } else {
-            div.innerHTML = "<em>No meetings</em>";
+              }).join('');
+            } else {
+              div.innerHTML = "<em>No meetings</em>";
+            }
+            div.setAttribute("aria-hidden", "false");
           }
-          div.setAttribute("aria-hidden","false");
         }
-      }
-    });
+      });
 
-    document.getElementById("bookNow").addEventListener("click", function(){ window.open("https://calendar.google.com/calendar/u/0/r/eventedit", "_blank"); });
+      document.getElementById("bookNow").addEventListener("click", function () { window.open("https://calendar.google.com/calendar/u/0/r/eventedit", "_blank"); });
 
-    setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleString(); },1000);
+      setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleString(); }, 1000);
 
-    (async function init(){
-      // Show skeleton loaders immediately
-      showSkeletonLoaders(21);
+      (async function init() {
+        // Show skeleton loaders immediately
+        showSkeletonLoaders(21);
 
-      let cfg = {
-        API_URL: "/api",
-        REFRESH_INTERVAL_SECONDS: AUTO_REFRESH_SECONDS_DEFAULT,
-        SHOW_LOGO: true,
-        AUTO_REFRESH: true
+        let cfg = {
+          API_URL: "/api",
+          REFRESH_INTERVAL_SECONDS: AUTO_REFRESH_SECONDS_DEFAULT,
+          SHOW_LOGO: true,
+          AUTO_REFRESH: true
+        };
+
+        try {
+          const resp = await fetch('/config.json', { cache: "no-cache" }); // Allow caching with revalidation
+          if (resp.ok) {
+            const parsed = await resp.json();
+            cfg = Object.assign(cfg, parsed);
+          }
+        } catch (e) { /* ignore */ }
+
+        API_BASE = (cfg.API_URL && String(cfg.API_URL).trim()) ? cfg.API_URL.trim() : API_BASE;
+
+        try {
+          const parsed = new URL(API_BASE, window.location.origin);
+          const socket = io(parsed.origin + '/rooms', { transports: ['websocket', 'polling'] });
+
+          socket.on('connect', () => console.log('socket connected', socket.id));
+          socket.on('disconnect', () => console.warn('socket disconnected'));
+
+          socket.on('room_state', async payload => {
+            try {
+              if (!payload || !payload.room_id) return;
+              const rid = String(payload.room_id);
+              try {
+                const data = await fetchMeetingsTodayForRoom(rid);
+                const todayOnly = Array.isArray(data) ? data.filter(isTodayEvent) : [];
+                const idx = (currentData || []).findIndex(r => String(r.id) === rid || String(r.calendarId) === rid || String(r.name) === rid);
+                if (idx >= 0) {
+                  currentData[idx].state = currentData[idx].state || {};
+                  currentData[idx].state.all = todayOnly;
+                  currentData[idx].state.last_success = new Date().toISOString();
+                } else {
+                  currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: todayOnly, last_success: new Date().toISOString() } });
+                }
+                renderRooms(currentData);
+                stopPoller(rid);
+                return;
+              } catch (e) { console.warn('socket per-room fetch failed', e); }
+
+              const idx2 = (currentData || []).findIndex(r => String(r.id) === String(payload.room_id) || String(r.calendarId) === String(payload.room_id) || String(r.name) === String(payload.room_id));
+              if (idx2 >= 0) {
+                currentData[idx2].state = payload.state;
+                renderRooms(currentData);
+              } else {
+                currentData.push({ id: payload.room_id, name: payload.room_id, calendarId: payload.room_id, state: payload.state || {} });
+                renderRooms(currentData);
+              }
+            } catch (e) { console.warn('room_state handler failed', e); }
+          });
+
+          socket.on('rooms_updated', () => {
+            if (typeof loadData === 'function') loadData();
+          });
+
+        } catch (e) {
+          console.warn('socket init failed (will use polling)', e);
+        }
+
+        await loadData();
+        if (cfg.AUTO_REFRESH && Number(cfg.REFRESH_INTERVAL_SECONDS) > 0) {
+          setInterval(loadData, Number(cfg.REFRESH_INTERVAL_SECONDS) * 1000);
+        }
+      })();
+
+      window.refreshRoomAndReload = async function (roomId) {
+        try {
+          if (!roomId) return;
+          const base = (typeof API_BASE === "string" && API_BASE.trim()) ? API_BASE.replace(/\/$/, "") : "/api";
+          await fetch(`${base}/rooms/${encodeURIComponent(roomId)}/state`, { method: "GET", cache: "no-cache" }).catch(() => null); // Allow caching with revalidation
+          if (typeof loadData === 'function') await loadData();
+          console.info('refreshRoomAndReload done for', roomId);
+        } catch (e) { console.warn('refreshRoomAndReload failed', e); }
       };
 
-      try {
-        const resp = await fetch('/config.json', { cache: "no-store" });
-        if (resp.ok) {
-          const parsed = await resp.json();
-          cfg = Object.assign(cfg, parsed);
-        }
-      }catch(e){ /* ignore */ }
-
-      API_BASE = (cfg.API_URL && String(cfg.API_URL).trim()) ? cfg.API_URL.trim() : API_BASE;
-
-      try{
-        const parsed = new URL(API_BASE, window.location.origin);
-        const socket = io(parsed.origin + '/rooms', { transports:['websocket','polling'] });
-
-        socket.on('connect', ()=> console.log('socket connected', socket.id));
-        socket.on('disconnect', ()=> console.warn('socket disconnected'));
-
-        socket.on('room_state', async payload=>{
-          try{
-            if(!payload || !payload.room_id) return;
-            const rid = String(payload.room_id);
-            try{
-              const data = await fetchMeetingsTodayForRoom(rid);
-              const todayOnly = Array.isArray(data) ? data.filter(isTodayEvent) : [];
-              const idx = (currentData||[]).findIndex(r => String(r.id) === rid || String(r.calendarId) === rid || String(r.name) === rid);
-              if(idx >= 0){
-                currentData[idx].state = currentData[idx].state || {};
-                currentData[idx].state.all = todayOnly;
-                currentData[idx].state.last_success = new Date().toISOString();
-              } else {
-                currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: todayOnly, last_success: new Date().toISOString() } });
-              }
-              renderRooms(currentData);
-              stopPoller(rid);
-              return;
-            }catch(e){ console.warn('socket per-room fetch failed', e); }
-
-            const idx2 = (currentData||[]).findIndex(r => String(r.id) === String(payload.room_id) || String(r.calendarId) === String(payload.room_id) || String(r.name) === String(payload.room_id));
-            if(idx2 >= 0){
-              currentData[idx2].state = payload.state;
-              renderRooms(currentData);
-            } else {
-              currentData.push({ id: payload.room_id, name: payload.room_id, calendarId: payload.room_id, state: payload.state || {} });
-              renderRooms(currentData);
-            }
-          }catch(e){ console.warn('room_state handler failed', e); }
-        });
-
-        socket.on('rooms_updated', ()=> {
-          if(typeof loadData === 'function') loadData();
-        });
-
-      }catch(e){
-        console.warn('socket init failed (will use polling)', e);
-      }
-
-      await loadData();
-      if(cfg.AUTO_REFRESH && Number(cfg.REFRESH_INTERVAL_SECONDS) > 0){
-        setInterval(loadData, Number(cfg.REFRESH_INTERVAL_SECONDS) * 1000);
-      }
     })();
-
-    window.refreshRoomAndReload = async function(roomId){
-      try{
-        if(!roomId) return;
-        const base = (typeof API_BASE === "string" && API_BASE.trim()) ? API_BASE.replace(/\/$/,"") : "/api";
-        await fetch(`${base}/rooms/${encodeURIComponent(roomId)}/state`, { method: "GET", cache: "no-store" }).catch(()=>null);
-        if(typeof loadData === 'function') await loadData();
-        console.info('refreshRoomAndReload done for', roomId);
-      }catch(e){ console.warn('refreshRoomAndReload failed', e); }
-    };
-
-  })();
   </script>
 
 </body>
+
 </html>
