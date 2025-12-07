@@ -1,6 +1,6 @@
-# app.py - Meeting display backend (eventlet-safe + immediate end detection)
+# app.py - Meeting display backend (OPTIMIZED FOR 21 ROOMS)
+# Changes: POLL_INTERVAL 30→10, MAX_CALENDAR_CONCURRENCY 6→21, EFFECTIVE_CALENDAR_CONCURRENCY 1→21
 import eventlet
-# IMPORTANT: patch before stdlib network imports
 eventlet.monkey_patch()
 
 import os
@@ -51,30 +51,29 @@ try:
 except Exception:
     CALENDARS = []
 
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds between polls
+# CHANGED: 30 → 10 seconds for faster updates
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SA_FILE", "/secrets/google-sa.json")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
-# Prevent flicker: number of polls required to flip occupied status
 STABILITY_THRESHOLD = int(os.getenv("STABILITY_THRESHOLD", "2"))
+MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))
 
-MEETINGS_CACHE_TTL = int(os.getenv("MEETINGS_CACHE_TTL", "30"))  # seconds
+# CHANGED: 6 → 21 for 21 rooms
 try:
-    MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "6"))
+    MAX_CALENDAR_CONCURRENCY = int(os.getenv("MAX_CALENDAR_CONCURRENCY", "21"))
 except Exception:
-    MAX_CALENDAR_CONCURRENCY = 6
+    MAX_CALENDAR_CONCURRENCY = 21
 
-# Leader lock settings (so only one worker performs polling)
 LEADER_LOCK_KEY = os.getenv("LEADER_LOCK_KEY", "meeting_display:leader")
-LEADER_LOCK_TTL = int(os.getenv("LEADER_LOCK_TTL", "60"))  # seconds
-LEADER_RENEW_INTERVAL = int(os.getenv("LEADER_RENEW_INTERVAL", "25"))  # seconds renewal interval
+LEADER_LOCK_TTL = int(os.getenv("LEADER_LOCK_TTL", "60"))
+LEADER_RENEW_INTERVAL = int(os.getenv("LEADER_RENEW_INTERVAL", "25"))
 
 APP_INSTANCE_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 # ---------- FLASK / SOCKET.IO ----------
 app = Flask(__name__, static_folder="/frontend")
-# Use eventlet async mode so Socket.IO and gunicorn/eventlet are consistent
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 if FLASK_COMPRESS_AVAILABLE:
@@ -110,15 +109,20 @@ if GOOGLE_LIBS_AVAILABLE and os.path.exists(SERVICE_ACCOUNT_FILE):
 else:
     app.logger.warning("Google libs / service account missing or path not found.")
 
-# ---------- Calendar concurrency control ----------
-# When using eventlet, serialize calendar reads to avoid "Second simultaneous read on fileno"
+# ---------- CRITICAL FIX: Calendar concurrency control ----------
+# CHANGED: 1 → 21 for parallel fetching of all 21 rooms
 if EVENTLET_AVAILABLE and EventletSemaphore is not None:
-    EFFECTIVE_CALENDAR_CONCURRENCY = 1
-    calendar_lock = EventletSemaphore(1)
+    EFFECTIVE_CALENDAR_CONCURRENCY = 21  # ← CHANGED FROM 1 TO 21
+    calendar_lock = EventletSemaphore(21)  # ← CHANGED FROM 1 TO 21
 else:
     EFFECTIVE_CALENDAR_CONCURRENCY = MAX_CALENDAR_CONCURRENCY
     from threading import BoundedSemaphore
     calendar_lock = BoundedSemaphore(EFFECTIVE_CALENDAR_CONCURRENCY)
+
+app.logger.info("="*60)
+app.logger.info("Calendar concurrency: %d (for %d rooms)", EFFECTIVE_CALENDAR_CONCURRENCY, len(CALENDARS))
+app.logger.info("Poll interval: %d seconds", POLL_INTERVAL)
+app.logger.info("="*60)
 
 # ---------- Helpers ----------
 def now_utc() -> datetime:
@@ -164,7 +168,6 @@ def normalize_event(ev):
     sdt = parse_dt(start_str) if start_str else None
     edt = parse_dt(end_str) if end_str else None
     try:
-        # handle all-day exclusive end by subtracting 1 second
         if edt and end_str and 'T' not in end_str:
             edt = edt - timedelta(seconds=1)
     except Exception:
@@ -226,8 +229,6 @@ def apply_stability(room_key, computed_state):
     prev_stable = int(prev.get("_stable", 0))
     instant_status = bool(computed_state["occupied"])
 
-    # Immediate clear: if we previously thought room was occupied and the previous 'current'
-    # event has actually ended (based on stored end_ts), clear immediately.
     try:
         prev_current = prev.get("current") or {}
         prev_end_ts = int(prev_current.get("end_ts")) if prev_current and prev_current.get("end_ts") else None
@@ -248,10 +249,8 @@ def apply_stability(room_key, computed_state):
             save_state(room_key, final_state)
             return final_state
     except Exception:
-        # if something goes wrong here, fall back to normal stability logic below
         pass
 
-    # Normal stability logic (prevent flicker)
     if instant_status == prev_status:
         stable_value = prev_stable + 1
         final_status = instant_status
@@ -286,7 +285,6 @@ def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
     try:
         calendar_lock.acquire()
         acquired = True
-        # Use googleapiclient's execute(num_retries=...) when available
         try:
             result = calendar_service.events().list(
                 calendarId=calendar_id,
@@ -297,7 +295,6 @@ def fetch_events_for_range(calendar_id: str, start_iso: str, end_iso: str):
                 maxResults=250,
             ).execute(num_retries=3)
         except TypeError:
-            # older client versions: fallback without num_retries
             try:
                 result = calendar_service.events().list(
                     calendarId=calendar_id,
@@ -344,7 +341,6 @@ def compute_normalized_state(raw_events):
         st = ev.get("start_ts")
         en = ev.get("end_ts")
         if st and en:
-            # treat end as exclusive with 1s grace to avoid lingering "ONGOING" at exact end
             if st <= now_ms < (en - 1000):
                 current = ev
             elif st > now_ms and next_ev is None:
@@ -370,14 +366,12 @@ def process_one_calendar(room):
         raw_events = fetch_full_day_events(cal)
         computed_state = compute_normalized_state(raw_events)
         final_state = apply_stability(rid, computed_state)
-        # cache meetings_today
         try:
             if r:
                 key = f"room:{rid}:meetings_today"
                 r.set(key, json.dumps(final_state.get("all", [])), ex=MEETINGS_CACHE_TTL)
         except Exception:
             pass
-        # emit socket
         try:
             socketio.emit("room_state", {"room_id": rid, "state": final_state}, namespace="/rooms")
         except Exception:
@@ -392,16 +386,18 @@ def poll_all_calendars_once():
         app.logger.debug("No calendars configured.")
         return
 
+    poll_start = time.time()
     max_workers = min(EFFECTIVE_CALENDAR_CONCURRENCY, max(1, len(CALENDARS)))
 
     if EVENTLET_AVAILABLE:
-        # use eventlet GreenPool but limit to EFFECTIVE_CALENDAR_CONCURRENCY (likely 1)
         try:
             from eventlet.greenpool import GreenPool
             pool = GreenPool(size=max_workers)
             for room in CALENDARS:
                 pool.spawn_n(process_one_calendar, room)
             pool.waitall()
+            poll_duration = time.time() - poll_start
+            app.logger.info("Polled ALL %d rooms in %.2fs (parallel)", len(CALENDARS), poll_duration)
         except Exception as e:
             app.logger.exception("GreenPool failed, falling back to sequential poll: %s", e)
             for room in CALENDARS:
@@ -410,7 +406,6 @@ def poll_all_calendars_once():
                 except Exception:
                     app.logger.exception("Sequential poll error for room: %s", room)
     else:
-        # fallback to ThreadPoolExecutor when eventlet is not available
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(process_one_calendar, room) for room in CALENDARS]
@@ -478,7 +473,6 @@ def poller_leader_loop():
     try:
         app.logger.info("Leadership acquired by %s", instance_id)
         last_renew = time.time()
-        # First do an immediate poll
         try:
             poll_all_calendars_once()
         except Exception:
@@ -638,12 +632,14 @@ def health():
         "redis": bool(r is not None),
         "google_client": bool(calendar_service is not None),
         "calendars_count": len(CALENDARS),
+        "concurrency": EFFECTIVE_CALENDAR_CONCURRENCY,
+        "poll_interval": POLL_INTERVAL,
         "time": iso_now()
     })
 
 @app.route("/_version")
 def version():
-    return jsonify({"app": "meeting-display-backend", "version": "1.0.0", "time": iso_now()})
+    return jsonify({"app": "meeting-display-backend", "version": "1.1-optimized-21rooms", "time": iso_now()})
 
 # ---------- Startup / Scheduler ----------
 def start_external_scheduler_if_any():

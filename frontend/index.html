@@ -46,7 +46,9 @@
       cursor:pointer;
       font-weight:600;
       box-shadow:0 8px 18px rgba(255,106,0,0.12);
+      transition:transform 0.2s;
     }
+    .btn:hover{ transform:translateY(-2px); }
 
     #clock{ color:var(--muted); font-size:13px; margin-left:8px; }
 
@@ -66,6 +68,48 @@
       gap:12px;
       margin-top:12px;
     }
+
+    /* ========== SKELETON LOADER STYLES ========== */
+    .skeleton-room{
+      background:var(--card-bg);
+      border-radius:12px;
+      padding:14px;
+      box-shadow:0 8px 24px rgba(11,11,11,0.06);
+      border:1px solid rgba(11,11,11,0.05);
+      min-height:120px;
+      position:relative;
+      overflow:hidden;
+    }
+
+    .skeleton-room::before{
+      content:'';
+      position:absolute;
+      top:0;
+      left:-100%;
+      width:100%;
+      height:100%;
+      background:linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent);
+      animation:shimmer 1.5s infinite;
+    }
+
+    @keyframes shimmer{
+      0%{ left:-100%; }
+      100%{ left:100%; }
+    }
+
+    .skeleton-line{
+      height:14px;
+      background:linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+      background-size:200% 100%;
+      border-radius:4px;
+      margin-bottom:8px;
+    }
+
+    .skeleton-line.title{ width:70%; height:16px; }
+    .skeleton-line.status{ width:50px; height:24px; border-radius:12px; margin-top:8px; }
+    .skeleton-line.meeting{ width:85%; height:12px; margin-top:10px; }
+    .skeleton-line.button{ width:120px; height:32px; border-radius:8px; margin-top:12px; }
+    /* ========================================== */
 
     .room{
       background:var(--card-bg);
@@ -136,7 +180,9 @@
       font-weight:700;
       border:1px solid rgba(255,106,0,0.12);
       cursor:pointer;
+      transition:0.2s;
     }
+    .listBtn:hover{ background:rgba(255,106,0,0.05); }
 
     .details{ margin-top:10px; display:none; font-size:14px; color:#222; }
     .details[aria-hidden="false"]{ display:block; }
@@ -157,6 +203,12 @@
       font-size:12px;
       font-weight:700;
       margin-left:6px;
+      animation:pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse{
+      0%, 100%{ opacity:1; }
+      50%{ opacity:0.7; }
     }
 
     .meta-row{
@@ -187,7 +239,6 @@
 
 <body>
 
-  <!-- HEADER -->
   <header>
     <div class="brand">
       <div class="logo">
@@ -208,7 +259,9 @@
   <div id="error" class="error" role="alert"></div>
 
   <main>
-    <div id="rooms" class="grid" aria-live="polite"></div>
+    <div id="rooms" class="grid" aria-live="polite">
+      <!-- Skeleton loaders will appear here initially -->
+    </div>
   </main>
 
   <footer>© 2025 Baaz Bike. All rights reserved.</footer>
@@ -216,21 +269,38 @@
   <script>
   (function(){
 
-    // default config & state
     let API_BASE = '/api';
     let currentData = [];
     const AUTO_REFRESH_SECONDS_DEFAULT = 10;
-    const POLL_FAST_MS = 3000;   // fast per-room polling attempts (3s)
-    const POLL_SLOW_MS = 30000;  // slower polling after a few attempts (30s)
-    const POLL_FAST_ROUNDS = 4;  // number of fast repeats before slowing
+    const POLL_FAST_MS = 3000;
+    const POLL_SLOW_MS = 30000;
+    const POLL_FAST_ROUNDS = 4;
 
-    // helpers
+    // ========== SKELETON LOADER FUNCTION ==========
+    function showSkeletonLoaders(count = 21){
+      const container = document.getElementById("rooms");
+      container.innerHTML = "";
+      
+      for(let i = 0; i < count; i++){
+        const skeleton = document.createElement("div");
+        skeleton.className = "skeleton-room";
+        skeleton.innerHTML = `
+          <div class="skeleton-line title"></div>
+          <div class="skeleton-line status"></div>
+          <div class="skeleton-line meeting"></div>
+          <div class="skeleton-line meeting" style="width:75%;"></div>
+          <div class="skeleton-line button"></div>
+        `;
+        container.appendChild(skeleton);
+      }
+    }
+    // ============================================
+
     function sanitizeId(v){ return String(v||'').replace(/[^a-z0-9\-]/gi,'-'); }
     function escapeHtml(s){ if(s===undefined||s===null) return ''; return String(s).replace(/[&"'<>]/g, c=>({ '&':'&amp;','"':'&quot;',"'":"&#39;",'<':'&lt;', '>':'&gt;' }[c])); }
     function formatTurfName(n){
       if(!n) return '';
       n = String(n).trim().replace(/[-_]+/g,' ').replace(/\s+/g,' ');
-      // capitalize first letter of each word (nice on display)
       return n.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     }
 
@@ -285,10 +355,14 @@
       return s <= now && now < e;
     }
 
-    // RENDER
     function renderRooms(data){
       const container = document.getElementById("rooms");
       container.innerHTML = "";
+
+      if(!data || data.length === 0){
+        container.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted);">No rooms configured</div>';
+        return;
+      }
 
       const now = Date.now();
 
@@ -299,14 +373,12 @@
         const state = room.state || {};
         const meetingsAll = Array.isArray(state.all) ? state.all : [];
 
-        // filter only today's meetings
         const meetingsToday = meetingsAll.filter(isTodayEvent).map(m=>{
           const s = toNumberTs(m, true) || (m.start ? new Date(m.start).getTime() : null);
           const e = toNumberTs(m, false) || (m.end ? new Date(m.end).getTime() : null);
           return Object.assign({}, m, { _start_ts: s, _end_ts: e });
         }).sort((a,b) => (a._start_ts||0) - (b._start_ts||0));
 
-        // pick top meetings to show: ongoing + next, or next two
         let topMeetings = [];
         const ongoing = meetingsToday.find(isOngoingEvent);
         if(ongoing){
@@ -376,14 +448,12 @@
       });
     }
 
-    // BATCH fetch
     async function fetchRoomsWithState(){
       const r = await fetch(`${API_BASE}/rooms/list-with-state`, { cache: "no-store" });
       if(!r.ok) throw new Error('Failed to fetch rooms list-with-state: ' + r.status);
       return await r.json();
     }
 
-    // per-room (meetings-today)
     async function fetchMeetingsTodayForRoom(rid){
       try{
         const url = `${API_BASE.replace(/\/$/,'')}/rooms/${encodeURIComponent(rid)}/meetings-today`;
@@ -397,7 +467,6 @@
       }
     }
 
-    // adaptive per-room pollers
     const pollers = {};
     function stopPoller(rid){
       if(!pollers[rid]) return;
@@ -406,14 +475,13 @@
     }
     function startPollerForRoom(rid){
       if(!rid) return;
-      if(pollers[rid]) return; // already running
+      if(pollers[rid]) return;
       pollers[rid] = { attempts: 0, timer: null };
 
       async function attempt(){
         pollers[rid].attempts++;
         const data = await fetchMeetingsTodayForRoom(rid);
         if(Array.isArray(data) && data.filter(isTodayEvent).length > 0){
-          // merge into currentData and re-render
           let idx = (currentData||[]).findIndex(r => String(r.id) === String(rid) || String(r.calendarId) === String(rid) || String(r.name) === String(rid));
           if(idx < 0){
             currentData.push({ id: rid, name: rid, calendarId: rid, state: { all: data, last_success: new Date().toISOString() } });
@@ -429,10 +497,8 @@
         return false;
       }
 
-      // immediate try
       attempt();
 
-      // set repeating timer: fast attempts for a few rounds, then slow down
       pollers[rid].timer = setInterval(async ()=>{
         if(pollers[rid].attempts >= POLL_FAST_ROUNDS){
           clearInterval(pollers[rid].timer);
@@ -449,13 +515,11 @@
       }, POLL_FAST_MS);
     }
 
-    // MAIN loading routine (batch + per-room fallback)
     async function loadData(){
       try{
         const rooms = await fetchRoomsWithState();
         const enriched = rooms.map(room => ({ id: room.id, name: room.name, calendarId: room.calendarId, state: room.state || {} }));
 
-        // for rooms with missing today data, do a one-shot per-room fetch
         const base = (typeof API_BASE === 'string' && API_BASE.trim()) ? API_BASE.replace(/\/$/,'') : '/api';
         const missing = enriched.filter(r => !(r.state && Array.isArray(r.state.all) && r.state.all.length > 0));
         if(missing.length){
@@ -474,7 +538,6 @@
         currentData = enriched;
         renderRooms(currentData);
 
-        // start pollers for any still-empty rooms
         enriched.forEach(r=>{
           const has = r.state && Array.isArray(r.state.all) && r.state.all.length > 0 && r.state.all.some(isTodayEvent);
           if(!has) startPollerForRoom(r.id);
@@ -487,7 +550,6 @@
       }
     }
 
-    // Toggle details (show full meetings) - uses cached data already loaded
     document.addEventListener("click", async e=>{
       if(e.target.classList.contains("listBtn")){
         const id = e.target.dataset.id;
@@ -498,7 +560,6 @@
           div.setAttribute("aria-hidden","true");
           div.innerHTML = "";
         } else {
-          // open — show full meetings for the day (sorted)
           const room = currentData.find(r=>String(r.calendarId)==String(id) || String(r.id)===String(id) || String(r.name)===String(id));
           let meetings = room && room.state && Array.isArray(room.state.all) ? room.state.all.filter(isTodayEvent) : [];
           meetings = (meetings || []).map(m=>{
@@ -527,15 +588,14 @@
       }
     });
 
-    // Book Now
     document.getElementById("bookNow").addEventListener("click", function(){ window.open("https://calendar.google.com/calendar/u/0/r/eventedit", "_blank"); });
 
-    // Clock
     setInterval(()=>{ document.getElementById("clock").textContent = new Date().toLocaleString(); },1000);
 
-    // Socket + init
     (async function init(){
-      // defaults
+      // Show skeleton loaders immediately
+      showSkeletonLoaders(21);
+
       let cfg = {
         API_URL: "/api",
         REFRESH_INTERVAL_SECONDS: AUTO_REFRESH_SECONDS_DEFAULT,
@@ -553,7 +613,6 @@
 
       API_BASE = (cfg.API_URL && String(cfg.API_URL).trim()) ? cfg.API_URL.trim() : API_BASE;
 
-      // try socket.io (if backend serves it)
       try{
         const parsed = new URL(API_BASE, window.location.origin);
         const socket = io(parsed.origin + '/rooms', { transports:['websocket','polling'] });
@@ -565,7 +624,6 @@
           try{
             if(!payload || !payload.room_id) return;
             const rid = String(payload.room_id);
-            // authoritative per-room fetch on state change (prefer server's meetings-today)
             try{
               const data = await fetchMeetingsTodayForRoom(rid);
               const todayOnly = Array.isArray(data) ? data.filter(isTodayEvent) : [];
@@ -582,7 +640,6 @@
               return;
             }catch(e){ console.warn('socket per-room fetch failed', e); }
 
-            // fallback - merge payload.state
             const idx2 = (currentData||[]).findIndex(r => String(r.id) === String(payload.room_id) || String(r.calendarId) === String(payload.room_id) || String(r.name) === String(payload.room_id));
             if(idx2 >= 0){
               currentData[idx2].state = payload.state;
@@ -602,14 +659,12 @@
         console.warn('socket init failed (will use polling)', e);
       }
 
-      // initial load + periodic batch refresh
       await loadData();
       if(cfg.AUTO_REFRESH && Number(cfg.REFRESH_INTERVAL_SECONDS) > 0){
         setInterval(loadData, Number(cfg.REFRESH_INTERVAL_SECONDS) * 1000);
       }
     })();
 
-    // Helper available to console (also injected server-side earlier)
     window.refreshRoomAndReload = async function(roomId){
       try{
         if(!roomId) return;
